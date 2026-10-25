@@ -1,0 +1,12 @@
+# MeetPoint AI - Windows 桌面端依赖（Python 3.12+）
+# 说明：QtWebEngine 实际由 PySide6-Addons 提供（PyPI 上的 PySide6-WebEngine 并非官方发行包）。
+PySide6-Essentials==6.8.3
+PySide6-Addons==6.8.3
+httpx[http2]>=0.27
+pydantic>=2.7
+shapely>=2.0
+python-dotenv>=1.0
+# 测试
+pytest>=8.0
+# 打包
+pyinstaller>=6.6

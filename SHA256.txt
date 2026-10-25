@@ -1,0 +1,2 @@
+5c1db9cae8e12993de0e0c847d86e68d4b61121d97007f74ac0bdebaa4afe82e  MeetPointAI-Setup-1.0.0-win64.exe
+34f054ff72a543f6142d67491cefeab45384f5820f27e49adc5487a1d9970992  MeetPointAI-1.0.0-source.zip

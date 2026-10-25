@@ -1,0 +1,444 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>MeetPoint AI 地图</title>
+<style>
+  html, body { margin: 0; padding: 0; height: 100%; background: #eef1f5; overflow: hidden;
+               font-family: "Microsoft YaHei", "Segoe UI", sans-serif; }
+  #map { position: absolute; inset: 0; }
+  #hint {
+    position: absolute; left: 50%; top: 12px; transform: translateX(-50%);
+    background: rgba(22, 34, 51, .86); color: #fff; padding: 8px 16px; border-radius: 18px;
+    font-size: 13px; z-index: 900; pointer-events: none; display: none; max-width: 80%;
+    box-shadow: 0 4px 14px rgba(0,0,0,.18);
+  }
+  #legend {
+    position: absolute; right: 12px; bottom: 14px; z-index: 900; background: rgba(255,255,255,.94);
+    border-radius: 10px; padding: 8px 12px; font-size: 12px; color: #33465e; line-height: 1.9;
+    box-shadow: 0 2px 10px rgba(0,0,0,.12); display: none;
+  }
+  .dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 6px; }
+  #fatal {
+    position: absolute; inset: 0; z-index: 1000; display: none; align-items: center;
+    justify-content: center; background: #f6f8fb; color: #4a5d75; font-size: 15px;
+    text-align: center; padding: 40px; line-height: 2;
+  }
+  #fatal b { display: block; font-size: 18px; color: #b3261e; margin-bottom: 10px; }
+  .marker-a, .marker-b, .marker-r {
+    width: 26px; height: 26px; line-height: 26px; border-radius: 50%; color: #fff;
+    text-align: center; font-size: 13px; font-weight: 700; border: 2px solid #fff;
+    box-shadow: 0 2px 8px rgba(0,0,0,.35); cursor: pointer;
+  }
+  .marker-a { background: #1e88e5; }
+  .marker-b { background: #e53935; }
+  .marker-r { background: #f9a825; color: #402c00; }
+  .marker-r.sel { background: #6a1b9a; color: #fff; transform: scale(1.15); }
+  .iw { font-size: 12px; line-height: 1.7; max-width: 260px; color: #2b3a4a; }
+  .iw b { font-size: 13px; }
+  .iw .leg { color: #455a64; }
+</style>
+<script>
+  // 安全密钥必须在加载 JS API 之前设置
+  window._AMapSecurityConfig = { securityJsCode: "__AMAP_SEC__" };
+  window.__MPAI = { ready: false, errors: [] };
+  window.onerror = function (msg, src, line, col, err) {
+    var text = (msg || "unknown") + (src ? " @ " + src + ":" + line : "");
+    window.__MPAI.errors.push(text);
+    try { if (window.bridge) window.bridge.reportError(text); } catch (e) {}
+    return false;
+  };
+  window.addEventListener("unhandledrejection", function (ev) {
+    var text = "Promise 异常: " + (ev.reason && ev.reason.message ? ev.reason.message : ev.reason);
+    window.__MPAI.errors.push(text);
+    try { if (window.bridge) window.bridge.reportError(text); } catch (e) {}
+  });
+</script>
+<script src="qrc:///qtwebchannel/qwebchannel.js"></script>
+<script src="https://webapi.amap.com/maps?v=2.0&key=__AMAP_KEY__&plugin=AMap.Scale,AMap.ToolBar,AMap.CircleEditor,AMap.PolygonEditor&callback=__mpaiAmapReady"></script>
+</head>
+<body>
+<div id="map"></div>
+<div id="hint"></div>
+<div id="legend">
+  <div><span class="dot" style="background:#1e88e5"></span>A 出发点</div>
+  <div><span class="dot" style="background:#e53935"></span>B 出发点</div>
+  <div><span class="dot" style="background:#f9a825"></span>推荐地点</div>
+  <div><span class="dot" style="background:#26a69a"></span>允许推荐区域</div>
+</div>
+<div id="fatal"><div><b>地图加载失败</b>高德 JavaScript API 未能初始化。<br />
+  仍可使用文字地址输入与缓存结果，点击「重新加载地图」重试。</div></div>
+
+<script>
+(function () {
+  "use strict";
+
+  var map = null, bridge = null;
+  var state = {
+    mode: "browse",
+    points: { A: null, B: null },
+    markers: { A: null, B: null },
+    circle: null, circleEditor: null,
+    polygon: null, polygonEditor: null,
+    draft: null, draftPoints: [],
+    resultMarkers: [], routeLines: [], infoWindow: null,
+    pendingRadius: 1000
+  };
+
+  function hint(text, sticky) {
+    var el = document.getElementById("hint");
+    if (!text) { el.style.display = "none"; return; }
+    el.textContent = text;
+    el.style.display = "block";
+    if (!sticky) setTimeout(function () { if (el.textContent === text) el.style.display = "none"; }, 2600);
+  }
+
+  function log(msg) {
+    try { if (bridge) bridge.reportLog(String(msg)); } catch (e) {}
+  }
+
+  function report(payload) {
+    try { if (bridge) bridge.reportStatus(JSON.stringify(payload)); } catch (e) {}
+  }
+
+  function fatal(msg) {
+    document.getElementById("fatal").style.display = "flex";
+    try { if (bridge) bridge.reportError(String(msg)); } catch (e) {}
+  }
+
+  function pinHtml(cls, label) {
+    return '<div class="' + cls + '">' + label + "</div>";
+  }
+
+  // ---------------------------------------------------------------- markers
+  function makeMarker(user, lnglat, name) {
+    var marker = new AMap.Marker({
+      position: lnglat,
+      content: pinHtml(user === "A" ? "marker-a" : "marker-b", user),
+      anchor: "center",
+      draggable: true,
+      title: (name || (user === "A" ? "A 点" : "B 点")),
+      zIndex: 120
+    });
+    marker.on("dragend", function (ev) {
+      var p = ev.target.getPosition();
+      var lng = p.getLng(), lat = p.getLat();
+      state.points[user] = { lng: lng, lat: lat, name: name || "" };
+      try { if (bridge) bridge.pointPicked(JSON.stringify({ user: user, lng: lng, lat: lat, source: "drag" })); } catch (e) {}
+    });
+    return marker;
+  }
+
+  function setPoint(user, lng, lat, name, silent) {
+    if (!map) return;
+    if (state.markers[user]) { map.remove(state.markers[user]); state.markers[user] = null; }
+    var marker = makeMarker(user, [lng, lat], name);
+    marker.setMap(map);
+    state.markers[user] = marker;
+    state.points[user] = { lng: lng, lat: lat, name: name || "" };
+    if (!silent) {
+      hint((user === "A" ? "A" : "B") + " 点已设置");
+    }
+  }
+
+  function clearPoint(user) {
+    if (state.markers[user]) { map.remove(state.markers[user]); state.markers[user] = null; }
+    state.points[user] = null;
+  }
+
+  // ---------------------------------------------------------------- region
+  function clearRegion() {
+    if (state.circleEditor) { state.circleEditor.close(); state.circleEditor = null; }
+    if (state.circle) { map.remove(state.circle); state.circle = null; }
+    if (state.polygonEditor) { state.polygonEditor.close(); state.polygonEditor = null; }
+    if (state.polygon) { map.remove(state.polygon); state.polygon = null; }
+    if (state.draft) { map.remove(state.draft); state.draft = null; }
+    state.draftPoints = [];
+  }
+
+  function setCircle(lng, lat, radius, silent) {
+    clearRegion();
+    state.circle = new AMap.Circle({
+      center: [lng, lat],
+      radius: radius,
+      strokeColor: "#26a69a",
+      strokeWeight: 2,
+      strokeOpacity: 0.9,
+      fillColor: "#26a69a",
+      fillOpacity: 0.14,
+      zIndex: 80,
+      bubble: true
+    });
+    state.circle.setMap(map);
+    try {
+      state.circleEditor = new AMap.CircleEditor(map, state.circle);
+      state.circleEditor.on("adjust", function () {
+        var c = state.circle.getCenter(), r = state.circle.getRadius();
+        try { if (bridge) bridge.circleChanged(JSON.stringify({ lng: c.lng, lat: c.lat, radius: r })); } catch (e) {}
+      });
+    } catch (e) { log("CircleEditor 初始化失败：" + e.message); }
+    if (!silent) { map.setFitView([state.circle], false, [60, 60, 60, 60]); hint("圆形区域已生效"); }
+  }
+
+  function setPolygon(points, silent) {
+    clearRegion();
+    if (!points || points.length < 3) return;
+    state.polygon = new AMap.Polygon({
+      path: points,
+      strokeColor: "#26a69a",
+      strokeWeight: 2,
+      fillColor: "#26a69a",
+      fillOpacity: 0.16,
+      zIndex: 80,
+      bubble: true
+    });
+    state.polygon.setMap(map);
+    attachPolygonEditor();
+    if (!silent) { map.setFitView([state.polygon], false, [60, 60, 60, 60]); hint("多边形区域已生效"); }
+  }
+
+  function attachPolygonEditor() {
+    if (!state.polygon) return;
+    try {
+      state.polygonEditor = new AMap.PolygonEditor(map, state.polygon);
+      state.polygonEditor.on("adjust", notifyPolygon);
+      state.polygonEditor.on("addnode", notifyPolygon);
+      state.polygonEditor.on("removenode", notifyPolygon);
+      state.polygonEditor.open();
+    } catch (e) { log("PolygonEditor 初始化失败：" + e.message); }
+  }
+
+  function notifyPolygon() {
+    if (!state.polygon) return;
+    var pts = state.polygon.getPath().map(function (p) { return [p.lng, p.lat]; });
+    try { if (bridge) bridge.polygonChanged(JSON.stringify({ points: pts, closed: true })); } catch (e) {}
+  }
+
+  function startPolygonDraft(first) {
+    clearRegion();
+    state.draftPoints = first ? [[first.lng, first.lat]] : [];
+    state.draft = new AMap.Polygon({
+      path: state.draftPoints,
+      strokeColor: "#26a69a", strokeWeight: 2, strokeStyle: "dashed",
+      fillColor: "#26a69a", fillOpacity: 0.08, zIndex: 80, bubble: true
+    });
+    state.draft.setMap(map);
+  }
+
+  function addDraftPoint(lng, lat) {
+    if (!state.draft) startPolygonDraft(null);
+    state.draftPoints.push([lng, lat]);
+    state.draft.setPath(state.draftPoints);
+    hint("已添加 " + state.draftPoints.length + " 个顶点（至少 3 个，双击闭合）", true);
+    try { if (bridge) bridge.polygonChanged(JSON.stringify({ points: state.draftPoints, closed: false })); } catch (e) {}
+  }
+
+  function closeDraft() {
+    if (!state.draftPoints || state.draftPoints.length < 3) {
+      hint("顶点不足 3 个，无法闭合多边形");
+      return;
+    }
+    var pts = state.draftPoints.slice();
+    if (state.draft) { map.remove(state.draft); state.draft = null; }
+    state.draftPoints = [];
+    setPolygon(pts, true);
+    try { if (bridge) bridge.polygonClosed(JSON.stringify({ points: pts })); } catch (e) {}
+    hint("多边形已闭合");
+  }
+
+  // ---------------------------------------------------------------- results
+  function clearResults() {
+    state.resultMarkers.forEach(function (m) { map.remove(m); });
+    state.resultMarkers = [];
+    state.routeLines.forEach(function (l) { map.remove(l); });
+    state.routeLines = [];
+    if (state.infoWindow) { state.infoWindow.close(); state.infoWindow = null; }
+  }
+
+  function showResults(items) {
+    clearResults();
+    if (!items || !items.length) return;
+    items.forEach(function (item, idx) {
+      var marker = new AMap.Marker({
+        position: [item.lng, item.lat],
+        content: pinHtml("marker-r", String(item.rank || idx + 1)),
+        anchor: "center",
+        zIndex: 130,
+        title: item.name
+      });
+      marker.on("click", function () {
+        try { if (bridge) bridge.selectResult(String(idx)); } catch (e) {}
+      });
+      marker.setMap(map);
+      state.resultMarkers.push(marker);
+    });
+    map.setFitView(state.resultMarkers, false, [80, 80, 80, 80]);
+    document.getElementById("legend").style.display = "block";
+  }
+
+  function markSelected(index) {
+    state.resultMarkers.forEach(function (m, i) {
+      m.setContent(pinHtml("marker-r" + (i === index ? " sel" : ""), String(i + 1)));
+    });
+    if (index >= 0 && state.resultMarkers[index]) {
+      var pos = state.resultMarkers[index].getPosition();
+      map.setCenter([pos.getLng(), pos.getLat()]);
+    }
+  }
+
+  function showRoutes(payload) {
+    state.routeLines.forEach(function (l) { map.remove(l); });
+    state.routeLines = [];
+    if (!payload) return;
+    function draw(path, color) {
+      if (!path || path.length < 2) return;
+      var line = new AMap.Polyline({
+        path: path, strokeColor: color, strokeWeight: 6, strokeOpacity: 0.85,
+        lineJoin: "round", lineCap: "round", zIndex: 100, showDir: true
+      });
+      line.setMap(map);
+      state.routeLines.push(line);
+    }
+    draw(payload.a, "#1e88e5");
+    draw(payload.b, "#e53935");
+    if (payload.poi) {
+      var iw = new AMap.InfoWindow({
+        content: '<div class="iw"><b>' + (payload.name || "推荐地点") + '</b><br/>' +
+                 (payload.detail || "") + "</div>",
+        offset: new AMap.Pixel(0, -18)
+      });
+      iw.open(map, payload.poi);
+      state.infoWindow = iw;
+    }
+    var layers = state.routeLines.slice();
+    if (state.resultMarkers.length) layers = layers.concat(state.resultMarkers);
+    if (layers.length) map.setFitView(layers, false, [80, 80, 80, 80]);
+  }
+
+  // ---------------------------------------------------------------- modes
+  function setMode(mode) {
+    state.mode = mode || "browse";
+    var mapEl = document.getElementById("map");
+    if (state.mode === "polygonEdit" && state.polygonEditor) {
+      state.polygonEditor.open();
+    } else if (state.polygonEditor && state.mode !== "polygonEdit") {
+      state.polygonEditor.close();
+    }
+    mapEl.style.cursor = (state.mode === "browse") ? "grab" : "crosshair";
+    if (state.mode === "setA") hint("请在图上点击 A 的出发位置");
+    else if (state.mode === "setB") hint("请在图上点击 B 的出发位置");
+    else if (state.mode === "circleCenter") hint("点击地图选择圆心");
+    else if (state.mode === "polygonDraw") hint("连续点击添加顶点，双击闭合多边形", true);
+    else if (state.mode === "polygonEdit") hint("拖动顶点可编辑多边形", true);
+    else hint("");
+  }
+
+  function onMapClick(ev) {
+    var lng = ev.lnglat.getLng(), lat = ev.lnglat.getLat();
+    if (state.mode === "setA" || state.mode === "setB") {
+      var user = state.mode === "setA" ? "A" : "B";
+      setPoint(user, lng, lat, "", true);
+      try { if (bridge) bridge.pointPicked(JSON.stringify({ user: user, lng: lng, lat: lat, source: "click" })); } catch (e) {}
+      setMode("browse");
+    } else if (state.mode === "circleCenter") {
+      setCircle(lng, lat, state.pendingRadius, true);
+      try { if (bridge) bridge.circleChanged(JSON.stringify({ lng: lng, lat: lat, radius: state.pendingRadius, source: "click" })); } catch (e) {}
+      hint("圆心已设置，可拖动修改");
+    } else if (state.mode === "polygonDraw") {
+      addDraftPoint(lng, lat);
+    }
+  }
+
+  function fitAll() {
+    var layers = [];
+    if (state.markers.A) layers.push(state.markers.A);
+    if (state.markers.B) layers.push(state.markers.B);
+    if (state.circle) layers.push(state.circle);
+    if (state.polygon) layers.push(state.polygon);
+    layers = layers.concat(state.resultMarkers);
+    if (layers.length) map.setFitView(layers, false, [70, 70, 70, 70]);
+  }
+
+  function initMap() {
+    if (typeof AMap === "undefined") { fatal("AMap 脚本未加载（网络或 Key 问题）"); return; }
+    try {
+      map = new AMap.Map("map", {
+        viewMode: "2D", zoom: 12, center: [117.200983, 39.084158],
+        resizeEnable: true, mapStyle: "amap://styles/normal", showLabel: true
+      });
+      map.addControl(new AMap.Scale());
+      map.addControl(new AMap.ToolBar({ position: { right: "18px", bottom: "80px" } }));
+      state.infoWindow = new AMap.InfoWindow({ offset: new AMap.Pixel(0, -18) });
+      map.on("click", onMapClick);
+      map.on("dblclick", function () {
+        if (state.mode === "polygonDraw") closeDraft();
+      });
+      map.on("complete", function () {
+        if (!window.__MPAI.ready) {
+          window.__MPAI.ready = true;
+          var center = map.getCenter();
+          report({ ready: true, version: (AMap.version || "2.0"), zoom: map.getZoom(),
+                   center: [center.getLng(), center.getLat()] });
+          hint("地图已就绪");
+        }
+      });
+      // 若 complete 未触发（部分环境下），3 秒兜底
+      setTimeout(function () {
+        if (!window.__MPAI.ready && map) {
+          window.__MPAI.ready = true;
+          report({ ready: true, version: (AMap.version || "2.0"), zoom: map.getZoom(), late: true });
+        }
+      }, 3000);
+      setMode("browse");
+    } catch (e) {
+      fatal("地图初始化异常：" + e.message);
+    }
+  }
+
+  // 供 AMap 脚本 callback 调用
+  window.__mpaiAmapReady = function () {
+    if (!bridge) { window.__mpaiPendingInit = true; return; }
+    initMap();
+  };
+
+  // ---------------------------------------------------------------- bridge
+  function connectBridge() {
+    if (typeof QWebChannel === "undefined") {
+      fatal("QWebChannel 不可用");
+      return;
+    }
+    new QWebChannel(qt.webChannelTransport, function (channel) {
+      bridge = channel.objects.bridge;
+      report({ ready: false, stage: "channel" });
+      if (window.__mpaiPendingInit || typeof AMap !== "undefined") initMap();
+    });
+  }
+
+  // 对外 API（Python 通过 runJavaScript 调用）
+  window.MPAI = {
+    setMode: function (mode) { setMode(mode); },
+    setPoint: function (user, lng, lat, name) { setPoint(user, Number(lng), Number(lat), name || "", true); },
+    clearPoint: function (user) { clearPoint(user); },
+    setCircle: function (lng, lat, radius) { setCircle(Number(lng), Number(lat), Number(radius), true); },
+    setPendingRadius: function (r) { state.pendingRadius = Number(r); },
+    setPolygon: function (points) { setPolygon(points, true); },
+    closePolygon: function () { closeDraft(); },
+    clearRegion: function () { clearRegion(); },
+    showResults: function (items) { showResults(items); },
+    selectResult: function (i) { markSelected(Number(i)); },
+    showRoutes: function (payload) { showRoutes(payload); },
+    clearResults: function () { clearResults(); },
+    fitAll: function () { fitAll(); },
+    focus: function (lng, lat, zoom) { if (map) map.setZoomAndCenter(zoom || 15, [Number(lng), Number(lat)]); },
+    ping: function () {
+      report({ ready: !!window.__MPAI.ready, hasMap: !!map, mode: state.mode,
+               errors: window.__MPAI.errors.slice(-5) });
+    }
+  };
+
+  connectBridge();
+})();
+</script>
+</body>
+</html>
