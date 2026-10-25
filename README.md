@@ -1,6 +1,8 @@
 # MeetPointAI
 配置高德地图的API及DeepSeek的API后给A、B两点及需求可以决定去哪见面
+
 This software only supports Simplified Chinese and isn't designed for regions outside of mainland China.
+
 你和对方分别在城市的不同位置，想约一个「双方都方便、又符合偏好」的见面地点？
 MeetPoint AI 用真实地图数据找出候选地点，用 DeepSeek 比较并给出推荐理由，再由程序做范围与路线校验——**不会编造地点，也不会推荐到区域外**。
 
