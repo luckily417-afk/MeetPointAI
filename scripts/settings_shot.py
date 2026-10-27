@@ -17,12 +17,25 @@ from ui.settings_dialog import SettingsDialog  # noqa: E402
 QLocale.setDefault(QLocale.c())
 QApplication.setAttribute(Qt.ApplicationAttribute.AA_ShareOpenGLContexts, True)
 app = QApplication(sys.argv)
+
+from PySide6.QtGui import QFont  # noqa: E402
+
+from ui.theme import APP_QSS, install_fonts  # noqa: E402
+
+app.setStyleSheet(APP_QSS)
+app.setStyle("Fusion")
+ui_font = QFont()
+ui_font.setFamilies([install_fonts(), "Microsoft YaHei UI", "Segoe UI"])
+ui_font.setPixelSize(13)
+app.setFont(ui_font)
+dialog_qss = None
 dialog = SettingsDialog(get_settings())
 dialog.show()
 
 
 def shoot() -> None:
-    out = ROOT / "docs"
+    out = Path(sys.argv[1]) if len(sys.argv) > 1 else ROOT / "docs"
+    out.mkdir(parents=True, exist_ok=True)
     dialog.grab().save(str(out / "screenshot_settings.png"))
     tabs = dialog.findChild(QTabWidget)
     if tabs is not None:

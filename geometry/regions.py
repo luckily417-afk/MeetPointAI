@@ -295,18 +295,25 @@ def tile_circle(
     target_km: float = 2.0,
     max_tiles: int = 36,
 ) -> list[CircleTile]:
-    """把圆形区域切成若干小圆，保证覆盖整个圆（含边界）。"""
+    """把圆形区域切成若干小圆，保证覆盖整个圆（含边界）。
+
+    `max_tiles` 是硬上限：块数超限时放大块半径直到满足上限，
+    绝不因为「至少 2×2 网格」之类的固定公式而突破配置（否则会多烧 API 配额）。
+    """
     parent_r = region.radius_m
-    cell_r = max(300.0, min(2000.0, target_km * 1000.0 / 2.0, parent_r / 1.5 or parent_r))
-    # 保证块数不超限
+    limit = max(1, int(max_tiles))
+    # 目标块半径：不大于 2 千米，也不大于父圆自身半径
+    cell_r = max(300.0, min(2000.0, target_km * 1000.0 / 2.0))
+    cell_r = min(cell_r, max(150.0, parent_r / 1.4))
+    minx, miny, maxx, maxy = region.bbox()
+    lat_span_m = (maxy - miny) * 111320.0
+    lng_span_m = (maxx - minx) * local_scale(region.center_lat)
+    # 保证块数不超限：块边长（spacing = 1.4×半径）增大，网格数单调下降，循环必然收敛
     while True:
         spacing = cell_r * 1.4
-        minx, miny, maxx, maxy = region.bbox()
-        lat_span_m = (maxy - miny) * 111320.0
-        lng_span_m = (maxx - minx) * local_scale(region.center_lat)
-        nx = max(1, math.ceil(lng_span_m / spacing) + 1)
-        ny = max(1, math.ceil(lat_span_m / spacing) + 1)
-        if nx * ny <= max_tiles or cell_r >= 20000:
+        nx = max(1, math.ceil(lng_span_m / spacing))
+        ny = max(1, math.ceil(lat_span_m / spacing))
+        if nx * ny <= limit:
             break
         cell_r *= 1.25
 
@@ -327,7 +334,11 @@ def tile_polygon(
     target_km: float = 2.0,
     max_tiles: int = 36,
 ) -> list[PolygonTile]:
-    """把多边形 bbox 切成矩形网格，丢弃与多边形无交集的格子。"""
+    """把多边形 bbox 切成矩形网格，丢弃与多边形无交集的格子。
+
+    `max_tiles` 是硬上限：网格数超限时放大边长（最多放大到覆盖整个 bbox）。
+    """
+    limit = max(1, int(max_tiles))
     minx, miny, maxx, maxy = region.bbox()
     proj = region.projector
     x0, y0 = proj.project(minx, miny)
@@ -338,7 +349,7 @@ def tile_polygon(
     while True:
         nx = max(1, math.ceil(width / cell))
         ny = max(1, math.ceil(height / cell))
-        if nx * ny <= max_tiles or cell > 50000:
+        if nx * ny <= limit:
             break
         cell *= 1.3
 

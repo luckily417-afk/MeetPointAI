@@ -1,11 +1,4 @@
-"""确定性排序算法（Python 侧，不依赖 AI）。
-
-取消原有"公平性评分"：不再以通勤时间差为目标，只保留可量化的排序维度：
-* 最短总通勤时间（A+B 之和）
-* 最少换乘
-* 指定场所类型优先
-所有排序均基于高德真实路线数据；无路线的候选项永远排在可用项之后。
-"""
+"""确定性排序算法：地点类型和评分决定顺序，路线只校验双方可达。"""
 
 from __future__ import annotations
 
@@ -22,12 +15,6 @@ __all__ = [
     "matches_category",
 ]
 
-# 各维度惩罚权重（仅影响排序，不是"公平性"评分）
-PENALTY_NO_ROUTE = 10_000.0
-PENALTY_TRANSFER = 180.0  # 每次换乘折算 3 分钟
-PENALTY_LONG_WALK = 1.2  # 每米步行折算
-
-
 @dataclass
 class RankContext:
     rec_mode: RecMode = RecMode.TOTAL_TIME
@@ -35,33 +22,18 @@ class RankContext:
     travel_mode: TravelMode = TravelMode.TRANSIT
 
 
-def _route_penalty(leg) -> float:
-    if leg is None or not leg.ok:
-        return PENALTY_NO_ROUTE
-    penalty = leg.transfers * PENALTY_TRANSFER
-    if leg.mode is TravelMode.TRANSIT and leg.walk_m > 800:
-        penalty += (leg.walk_m - 800) * PENALTY_LONG_WALK
-    return penalty
-
-
 def score_candidates(candidates: Iterable[Candidate], ctx: RankContext) -> list[Candidate]:
     """就地写入 score 并返回按分数升序的列表（分数越小越优）。"""
     scored: list[Candidate] = []
     for cand in candidates:
-        total = cand.total_duration_s
-        base = total / 60.0 if total > 0 else PENALTY_NO_ROUTE
-        leg_a_penalty = _route_penalty(cand.leg_a)
-        leg_b_penalty = _route_penalty(cand.leg_b)
-
+        rating = cand.poi.rating or 0.0
+        score = -rating
         if ctx.rec_mode is RecMode.FEWEST_TRANSFERS:
-            score = cand.total_transfers * 120.0 + base * 0.3
-        elif ctx.rec_mode is RecMode.CATEGORY_PRIORITY:
-            score = base + (0.0 if matches_category(cand, ctx.category) else 90.0)
-        else:  # TOTAL_TIME / CUSTOM / fallback for AI
-            score = base
-        score += (leg_a_penalty + leg_b_penalty) / 60.0 * 0.5
+            score += cand.total_transfers * 10.0
+        if ctx.category != "任意类型" and not matches_category(cand, ctx.category):
+            score += 10.0
         if not cand.routes_ok:
-            score += PENALTY_NO_ROUTE
+            score += 1000.0
         cand.score = round(score, 2)
         scored.append(cand)
     scored.sort(key=lambda c: (c.score, c.poi.name))
@@ -120,11 +92,9 @@ def to_recommendations(
 def _default_reason(cand: Candidate) -> str:
     parts: list[str] = []
     if cand.leg_a and cand.leg_a.ok and cand.leg_b and cand.leg_b.ok:
-        parts.append(
-            f"A 约 {cand.leg_a.duration_min:.0f} 分钟、B 约 {cand.leg_b.duration_min:.0f} 分钟可达"
-        )
-    if cand.total_transfers == 0:
-        parts.append("双方均无需换乘或换乘较少")
+        parts.append("双方均可到达")
+    if cand.poi.type_name:
+        parts.append(cand.poi.type_name.split(";")[-1])
     if cand.poi.business_area:
         parts.append(f"位于{cand.poi.business_area}")
     if cand.poi.rating:

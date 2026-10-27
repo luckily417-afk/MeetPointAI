@@ -241,6 +241,9 @@ class HealthMonitor:
                 detail="未配置 API Key",
             )
         if slot.probe is None:
+            # 没有探针的服务（如 JS API 只能在界面里验证）不能一直"到期"，
+            # 否则 check_due() 每一轮都会把它当成待检查项。
+            slot.next_check_at = time.time() + max(0, self.interval_s)
             return self.snapshot(name)
         started = time.perf_counter()
         try:

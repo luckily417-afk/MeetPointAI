@@ -31,6 +31,7 @@ from PySide6.QtWidgets import (
 )
 
 from config.settings import Settings
+from ui.widgets import ChevronDoubleSpinBox, ChevronSpinBox
 
 __all__ = ["SettingsDialog"]
 
@@ -42,7 +43,7 @@ class SettingsDialog(QDialog):
     def __init__(self, settings: Settings, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setWindowTitle("设置 · MeetPoint AI")
-        self.setMinimumWidth(620)
+        self.setMinimumWidth(640)
         self._settings = settings
         self._widgets: dict[str, Any] = {}
         self._build_ui()
@@ -62,11 +63,12 @@ class SettingsDialog(QDialog):
             "界面与日志均只显示脱敏结果。"
         )
         hint.setWordWrap(True)
-        hint.setStyleSheet("color:#6d7d90;font-size:11px;")
+        hint.setObjectName("muted")
         layout.addWidget(hint)
 
         buttons = QDialogButtonBox()
         self.btn_save = buttons.addButton("保存并应用", QDialogButtonBox.AcceptRole)
+        self.btn_save.setObjectName("primary")
         self.btn_cancel = buttons.addButton("取消", QDialogButtonBox.RejectRole)
         self.btn_reset = buttons.addButton("恢复默认", QDialogButtonBox.ResetRole)
         buttons.accepted.connect(self._on_accept)
@@ -76,7 +78,7 @@ class SettingsDialog(QDialog):
 
     # ------------------------------------------------------------------ #
     def _spin(self, key: str, value: int, lo: int, hi: int, suffix: str = "") -> QSpinBox:
-        box = QSpinBox()
+        box = ChevronSpinBox()
         box.setRange(lo, hi)
         box.setValue(int(value))
         if suffix:
@@ -87,7 +89,7 @@ class SettingsDialog(QDialog):
     def _dspin(
         self, key: str, value: float, lo: float, hi: float, decimals: int = 1, suffix: str = ""
     ) -> QDoubleSpinBox:
-        box = QDoubleSpinBox()
+        box = ChevronDoubleSpinBox()
         box.setRange(lo, hi)
         box.setDecimals(decimals)
         box.setSingleStep(0.5 if decimals else 50)
@@ -105,10 +107,10 @@ class SettingsDialog(QDialog):
         form = QFormLayout(box)
         form.addRow("推荐数量（1-10）", self._spin("top_n", self._settings.top_n, 1, 10, " 个"))
         form.addRow("参与路线规划的候选上限", self._spin("max_candidates", self._settings.max_candidates, 3, 80, " 个"))
-        form.addRow("送入 AI 的候选上限", self._spin("ai_candidate_limit", self._settings.ai_candidate_limit, 3, 30, " 个"))
-        note = QLabel("候选越多，AI 比较越充分但耗时与 Token 越高；推荐数量即最终展示条数。")
+        form.addRow("每批送入 AI 的候选上限", self._spin("ai_candidate_limit", self._settings.ai_candidate_limit, 3, 80, " 个"))
+        note = QLabel("双方可达的地点会分批交给 AI 比较；此上限控制每次调用的数量，不会直接丢弃其余地点。批次越多，耗时与 Token 越高。")
         note.setWordWrap(True)
-        note.setStyleSheet("color:#6d7d90;font-size:11px;")
+        note.setObjectName("muted")
         form.addRow("", note)
         outer.addWidget(box)
 
@@ -122,7 +124,7 @@ class SettingsDialog(QDialog):
         )
         note2 = QLabel("分块越大调用越少但单块可能超过接口上限；建议 2 千米 / 36 块。")
         note2.setWordWrap(True)
-        note2.setStyleSheet("color:#6d7d90;font-size:11px;")
+        note2.setObjectName("muted")
         form2.addRow("", note2)
         outer.addWidget(box2)
         outer.addStretch(1)
@@ -171,7 +173,6 @@ class SettingsDialog(QDialog):
     def _secret_edit(self, value: str) -> QLineEdit:
         edit = QLineEdit(value)
         edit.setEchoMode(QLineEdit.Password)
-        edit.setClearButtonEnabled(True)
         edit.setPlaceholderText("留空表示未配置")
         return edit
 
@@ -209,7 +210,7 @@ class SettingsDialog(QDialog):
         )
         tip = QLabel("周期检测填 0 表示关闭；故障时会自动指数退避，不会频繁打点。")
         tip.setWordWrap(True)
-        tip.setStyleSheet("color:#6d7d90;font-size:11px;")
+        tip.setObjectName("muted")
         form2.addRow("", tip)
         outer.addWidget(box2)
         outer.addStretch(1)
@@ -270,7 +271,7 @@ class SettingsDialog(QDialog):
             QMessageBox.warning(self, "参数错误", "推荐数量必须在 1-10 之间")
             return
         if values["ai_candidate_limit"] < values["top_n"]:
-            QMessageBox.warning(self, "参数错误", "送入 AI 的候选上限不能小于推荐数量")
+            QMessageBox.warning(self, "参数错误", "每批送入 AI 的候选上限不能小于推荐数量")
             return
         if values["max_candidates"] < values["top_n"]:
             QMessageBox.warning(self, "参数错误", "候选上限不能小于推荐数量")

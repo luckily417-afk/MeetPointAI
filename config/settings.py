@@ -115,8 +115,8 @@ class Settings:
 
     # --- 推荐 ---
     top_n: int = 5
-    max_candidates: int = 20
-    ai_candidate_limit: int = 12
+    max_candidates: int = 30
+    ai_candidate_limit: int = 30
     poi_page_size: int = 25
     poi_max_pages: int = 4
     tile_target_km: float = 2.0
@@ -150,8 +150,8 @@ class Settings:
             llm_latency_warn_ms=max(1000, _env_int("MPAI_LLM_LATENCY_WARN_MS", 60000)),
             health_interval_s=max(0, _env_int("MPAI_HEALTH_INTERVAL", 60)),
             top_n=max(1, min(10, _env_int("MPAI_TOP_N", 5))),
-            max_candidates=max(3, min(80, _env_int("MPAI_MAX_CANDIDATES", 20))),
-            ai_candidate_limit=max(3, min(30, _env_int("MPAI_AI_CANDIDATES", 12))),
+            max_candidates=max(3, min(80, _env_int("MPAI_MAX_CANDIDATES", 30))),
+            ai_candidate_limit=max(3, min(80, _env_int("MPAI_AI_CANDIDATES", 30))),
             poi_page_size=max(1, min(25, _env_int("MPAI_POI_PAGE_SIZE", 25))),
             poi_max_pages=max(1, _env_int("MPAI_POI_MAX_PAGES", 4)),
             tile_target_km=max(0.5, _env_float("MPAI_TILE_KM", 2.0)),
@@ -247,7 +247,7 @@ def save_env(overrides: dict[str, Any], path: Path | None = None) -> Path:
     lines: list[str] = []
     if target.is_file():
         try:
-            lines = target.read_text(encoding="utf-8").splitlines()
+            lines = target.read_text(encoding="utf-8-sig").splitlines()
         except OSError:
             lines = []
     pending = {ENV_KEY_BY_FIELD[k]: v for k, v in overrides.items() if k in ENV_KEY_BY_FIELD}

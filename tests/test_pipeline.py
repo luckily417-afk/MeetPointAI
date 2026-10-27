@@ -121,7 +121,7 @@ def test_pipeline_ai_success(tmp_path):
         {
             "summary": "综合推荐",
             "items": [
-                {"poi_id": "B002", "rank": 1, "reason": "双方通勤最短"},
+                {"poi_id": "B002", "rank": 1, "reason": "场所类型符合偏好"},
                 {"poi_id": "B001", "rank": 2, "reason": "环境安静"},
             ],
         }
@@ -131,7 +131,7 @@ def test_pipeline_ai_success(tmp_path):
 
     assert result.source == "ai"
     assert [r.poi.id for r in result.recommendations] == ["B002", "B001"]
-    assert result.recommendations[0].reason == "双方通勤最短"
+    assert result.recommendations[0].reason == "场所类型符合偏好"
     # 区域外的 OUTSIDE 必须被几何硬过滤
     assert all(r.poi.id != "OUTSIDE" for r in result.recommendations)
     assert result.stats["in_region"] == 3

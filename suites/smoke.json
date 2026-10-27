@@ -1,0 +1,8 @@
+{
+  "name": "离线冒烟套件",
+  "budget": { "max_cases": 5, "max_api_calls": 400 },
+  "cases": [
+    { "name": "圆形区域-咖啡厅", "config": "../cases/basic.json" },
+    { "name": "多边形区域-公园", "config": "../cases/polygon.json" }
+  ]
+}

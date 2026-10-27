@@ -1,0 +1,9 @@
+MeetPoint AI V0.0.0.1 安装包
+
+支持 Windows 10、Windows 11 的 64 位系统。安装后从开始菜单启动 MeetPoint AI。
+
+首次运行请打开程序内的“设置”，填入您自己的高德地图与 DeepSeek API Key，再保存并应用。
+应用会将配置保存在本机；安装包不包含开发者的密钥、运行记录或缓存。
+
+高级用户可在安装目录运行 meetpoint-debug.exe --help 查看命令行诊断工具。
+卸载可通过 Windows“已安装的应用”或开始菜单快捷方式完成。

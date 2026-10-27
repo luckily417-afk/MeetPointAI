@@ -1,0 +1,13 @@
+{
+  "name": "天津站-天津大学 咖啡厅 3km",
+  "a": { "name": "天津站", "lng": 117.210089, "lat": 39.135951, "adcode": "120105" },
+  "b": { "name": "天津大学", "lng": 117.311568, "lat": 38.992672, "adcode": "120112" },
+  "travel_mode": "transit",
+  "category": "咖啡厅",
+  "keyword": "",
+  "prefs": "安静、适合聊天、人均 80 元以内",
+  "region": { "mode": "circle", "center": [117.2115, 39.136], "radius_m": 3000 },
+  "top_n": 5,
+  "rec_mode": "ai",
+  "budget": { "max_api_calls": 400, "max_tokens": 60000, "timeout_s": 90 }
+}

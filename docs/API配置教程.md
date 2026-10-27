@@ -79,14 +79,14 @@ MPAI_DATA_DIR=
 
 ## 5. 打包后如何配置
 
-`dist\MeetPointAI\MeetPointAI.exe` 会读取**同目录**下的 `.env`。打包脚本会自动复制一份；
-若要换 Key，直接编辑 `dist\MeetPointAI\.env` 后重启程序即可。
+`dist\MeetPoint AI\MeetPoint AI.exe` 会读取**同目录**下的 `.env`。打包脚本会自动复制一份；
+若要换 Key，直接编辑 `dist\MeetPoint AI\.env` 后重启程序即可。
 
 也可以不改文件，用系统环境变量覆盖（优先级更高，取决于启动方式）：
 
 ```powershell
 $env:AMAP_WEB_KEY = "新的KEY"
-.\dist\MeetPointAI\MeetPointAI.exe
+.\dist\MeetPoint AI\MeetPoint AI.exe
 ```
 
 ---
@@ -115,7 +115,7 @@ $env:AMAP_WEB_KEY = "新的KEY"
 .\.venv\Scripts\python.exe main.py --self-test
 
 # 打包产物（报告写到 %LOCALAPPDATA%\MeetPointAI\self_test.json）
-dist\MeetPointAI\MeetPointAI.exe --self-test
+dist\MeetPoint AI\MeetPoint AI.exe --self-test
 ```
 
 自检会真实调用：高德健康探测、POI 搜索、驾车路线、DeepSeek 对话，各自独立判定，便于快速定位是哪一路凭据出问题。

@@ -84,6 +84,11 @@ class DeepSeekService:
         return bool(self._key)
 
     @property
+    def transport(self) -> HttpTransport:
+        """底层连接池（诊断层用它统计真实 HTTP 次数，含重试）。"""
+        return self._transport
+
+    @property
     def model(self) -> str:
         return self._model
 
@@ -174,7 +179,8 @@ class DeepSeekService:
                 timeout=timeout_s or self._llm_timeout,
             )
         except DeepSeekError as exc:
-            # 部分模型/账户不支持 reasoning_effort（HTTP 400）：去掉参数重试一次
+            # 部分模型/账户不支持 reasoning_effort（HTTP 400）：去掉参数重试一次，
+            # 并记住这个账户不支持，避免每次调用都先白付一次 400。
             if exc.http_status == 400 and "reasoning_effort" in body:
                 body.pop("reasoning_effort", None)
                 payload, status, latency = await self._transport.post_json(
@@ -186,6 +192,7 @@ class DeepSeekService:
                     validate=self._validate,
                     timeout=timeout_s or self._llm_timeout,
                 )
+                self._effort = ""
             else:
                 raise
         except Exception as exc:  # noqa: BLE001

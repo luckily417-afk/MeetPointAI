@@ -11,7 +11,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Iterable, Protocol, Sequence
 
-from config.constants import AMAP_REST_BASE
+from config.constants import AMAP_POI_MAX_OFFSET, AMAP_REST_BASE
 from geometry.crs import haversine
 from models.schemas import (
     Poi,
@@ -22,7 +22,13 @@ from models.schemas import (
     format_location,
     parse_location,
 )
-from services.errors import AmapError, NotConfiguredError, classify_amap_payload
+from services.errors import (
+    AmapError,
+    NotConfiguredError,
+    ServiceError,
+    classify_amap_payload,
+    classify_http_status,
+)
 from services.http_client import HttpTransport, redact
 
 __all__ = ["AMapWebService", "PoiPage", "GeocodeHit", "CacheProtocol", "HealthProbeResult"]
@@ -90,6 +96,11 @@ class AMapWebService:
     def configured(self) -> bool:
         return bool(self._key)
 
+    @property
+    def transport(self) -> HttpTransport:
+        """底层连接池（诊断层用它统计真实 HTTP 次数，含重试）。"""
+        return self._transport
+
     def _require_key(self) -> None:
         if not self._key:
             raise NotConfiguredError(ServiceName.AMAP_WEB, "高德 Web 服务 API Key 未配置")
@@ -104,29 +115,47 @@ class AMapWebService:
 
     def _validate_amap(self, payload: dict[str, Any], status: int) -> None:
         if status >= 400:
-            state, _ = classify_amap_payload({})
+            state, retryable = classify_http_status(status)
             raise AmapError(
                 f"高德接口 HTTP {status}",
-                state=ServiceState.SERVICE_ERROR,
+                state=state,
                 http_status=status,
-                retryable=status >= 500 or status == 429,
+                retryable=retryable,
             )
         state, code, detail = classify_amap_payload(payload)
         if state is not ServiceState.OK:
+            # 只有"限流/超时"值得重试；参数类业务错误重试毫无意义，只会白烧配额。
             raise AmapError(
                 detail or "高德接口返回失败",
                 state=state,
                 http_status=status,
                 biz_code=code,
-                retryable=state in {ServiceState.QUOTA_LIMITED, ServiceState.SERVICE_ERROR, ServiceState.TIMEOUT},
+                retryable=state in {ServiceState.QUOTA_LIMITED, ServiceState.TIMEOUT},
                 detail=redact(str(payload)[:300]),
             )
 
     async def _get(self, path: str, *, retries: int = 2, **kwargs: Any) -> tuple[dict[str, Any], int, int]:
         self._require_key()
         url = f"{self._base}{path}"
-        return await self._transport.get_json(
-            "amap_web", url, self._params(**kwargs), max_retries=retries, validate=self._validate_amap
+        try:
+            return await self._transport.get_json(
+                "amap_web", url, self._params(**kwargs), max_retries=retries, validate=self._validate_amap
+            )
+        except ServiceError as exc:
+            raise self._as_amap_error(exc) from exc
+
+    @staticmethod
+    def _as_amap_error(exc: ServiceError) -> ServiceError:
+        """传输层抛的是基类 ServiceError；转成 AmapError，让上层 `except AmapError` 生效。"""
+        if isinstance(exc, AmapError):
+            return exc
+        return AmapError(
+            exc.message,
+            state=exc.state,
+            http_status=exc.http_status,
+            biz_code=exc.biz_code,
+            retryable=exc.retryable,
+            detail=exc.detail,
         )
 
     # ------------------------------------------------------------------ #
@@ -150,25 +179,28 @@ class AMapWebService:
         biz_ext = raw.get("biz_ext") or {}
         if not isinstance(biz_ext, dict):
             biz_ext = {}
-        poi = Poi(
-            id=str(raw.get("id", "")),
-            name=str(raw.get("name", "")).strip(),
-            lng=lng,
-            lat=lat,
-            address=str(raw.get("address", "") or "").strip(),
-            type_name=str(raw.get("type", "") or ""),
-            type_code=str(raw.get("typecode", "") or ""),
-            tel=str(raw.get("tel", "") or ""),
-            pname=str(raw.get("pname", "") or ""),
-            cityname=str(raw.get("cityname", "") or ""),
-            adname=str(raw.get("adname", "") or ""),
-            business_area=str(raw.get("business_area", "") or ""),
-            adcode=str(raw.get("adcode", "") or ""),
-            distance_m=cls._parse_float(raw.get("distance")),
-            rating=cls._parse_float(biz_ext.get("rating")),
-            cost=cls._parse_float(biz_ext.get("cost")),
-        )
-        return poi
+        try:
+            # 单条 POI 缺 id/name 属于脏数据，丢弃它即可，不能让整轮检索崩掉。
+            return Poi(
+                id=str(raw.get("id", "")),
+                name=str(raw.get("name", "")).strip(),
+                lng=lng,
+                lat=lat,
+                address=str(raw.get("address", "") or "").strip(),
+                type_name=str(raw.get("type", "") or ""),
+                type_code=str(raw.get("typecode", "") or ""),
+                tel=str(raw.get("tel", "") or ""),
+                pname=str(raw.get("pname", "") or ""),
+                cityname=str(raw.get("cityname", "") or ""),
+                adname=str(raw.get("adname", "") or ""),
+                business_area=str(raw.get("business_area", "") or ""),
+                adcode=str(raw.get("adcode", "") or ""),
+                distance_m=cls._parse_float(raw.get("distance")),
+                rating=cls._parse_float(biz_ext.get("rating")),
+                cost=cls._parse_float(biz_ext.get("cost")),
+            )
+        except ValueError:
+            return None
 
     def _parse_page(self, payload: dict[str, Any], page: int, offset: int) -> PoiPage:
         raw_pois = payload.get("pois") or []
@@ -199,13 +231,14 @@ class AMapWebService:
         offset: int = 25,
         citylimit: bool = False,
     ) -> PoiPage:
+        offset = min(AMAP_POI_MAX_OFFSET, max(1, offset))
         payload, _, _ = await self._get(
             "/v3/place/text",
             keywords=keywords,
             city=city,
             types=types,
             page=page,
-            offset=min(25, max(1, offset)),
+            offset=offset,
             citylimit="true" if citylimit else None,
             extensions="all",
         )
@@ -222,6 +255,7 @@ class AMapWebService:
         offset: int = 25,
         sortrule: str = "distance",
     ) -> PoiPage:
+        offset = min(AMAP_POI_MAX_OFFSET, max(1, offset))
         payload, _, _ = await self._get(
             "/v3/place/around",
             location=format_location(*center),
@@ -229,7 +263,7 @@ class AMapWebService:
             types=types,
             keywords=keywords,
             page=page,
-            offset=min(25, max(1, offset)),
+            offset=offset,
             sortrule=sortrule,
             extensions="all",
         )
@@ -244,6 +278,7 @@ class AMapWebService:
         page: int = 1,
         offset: int = 25,
     ) -> PoiPage:
+        offset = min(AMAP_POI_MAX_OFFSET, max(1, offset))
         polygon = "|".join(f"{float(x):.6f},{float(y):.6f}" for x, y in points)
         payload, _, _ = await self._get(
             "/v3/place/polygon",
@@ -251,7 +286,7 @@ class AMapWebService:
             types=types,
             keywords=keywords,
             page=page,
-            offset=min(25, max(1, offset)),
+            offset=offset,
             extensions="all",
         )
         return self._parse_page(payload, page, offset)
@@ -405,13 +440,17 @@ class AMapWebService:
     async def _route_bicycling(
         self, origin: tuple[float, float], destination: tuple[float, float]
     ) -> RouteLeg:
+        self._require_key()
         # v4 骑行接口使用 errcode/errmsg 结构
-        payload, status, _ = await self._transport.get_json(
-            "amap_web",
-            f"{self._base}/v4/direction/bicycling",
-            self._params(origin=format_location(*origin), destination=format_location(*destination)),
-            max_retries=1,
-        )
+        try:
+            payload, status, _ = await self._transport.get_json(
+                "amap_web",
+                f"{self._base}/v4/direction/bicycling",
+                self._params(origin=format_location(*origin), destination=format_location(*destination)),
+                max_retries=1,
+            )
+        except ServiceError as exc:
+            raise self._as_amap_error(exc) from exc
         if status >= 400 or int(payload.get("errcode", 0) or 0) != 0:
             raise AmapError(
                 f"骑行路线失败：{payload.get('errmsg', '') or status}",

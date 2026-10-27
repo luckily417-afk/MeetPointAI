@@ -179,6 +179,10 @@ class MapController(QObject):
         self._ready = False
         self.load()
 
+    def update_settings(self, settings: Settings) -> None:
+        """设置变更后必须把新配置交给地图：load() 用的是这里的 Key/安全密钥。"""
+        self._settings = settings
+
     def _on_ready(self, info: dict[str, Any]) -> None:
         self._ready = True
         self._watchdog.stop()

@@ -36,7 +36,7 @@ TRAVEL_MODE_LABELS: Final[dict[str, str]] = {
 
 REC_MODE_LABELS: Final[dict[str, str]] = {
     "ai": "AI 综合推荐",
-    "total_time": "最短总通勤时间",
+    "total_time": "地点品质优先",
     "fewest_transfers": "最少换乘",
     "category_priority": "指定场所类型优先",
     "custom": "自然语言自定义需求",

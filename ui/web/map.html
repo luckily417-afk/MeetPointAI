@@ -5,39 +5,38 @@
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>MeetPoint AI 地图</title>
 <style>
-  html, body { margin: 0; padding: 0; height: 100%; background: #eef1f5; overflow: hidden;
-               font-family: "Microsoft YaHei", "Segoe UI", sans-serif; }
+  html, body { margin: 0; padding: 0; height: 100%; background: #f0f2f4; overflow: hidden;
+               font-family: "Geist", "Microsoft YaHei UI", "Microsoft YaHei", sans-serif; }
   #map { position: absolute; inset: 0; }
   #hint {
     position: absolute; left: 50%; top: 12px; transform: translateX(-50%);
-    background: rgba(22, 34, 51, .86); color: #fff; padding: 8px 16px; border-radius: 18px;
-    font-size: 13px; z-index: 900; pointer-events: none; display: none; max-width: 80%;
-    box-shadow: 0 4px 14px rgba(0,0,0,.18);
+    background: rgba(20, 20, 20, .92); color: #fff; padding: 6px 11px; border-radius: 4px;
+    font-size: 12px; z-index: 900; pointer-events: none; display: none; max-width: 80%;
   }
   #legend {
-    position: absolute; right: 12px; bottom: 14px; z-index: 900; background: rgba(255,255,255,.94);
-    border-radius: 10px; padding: 8px 12px; font-size: 12px; color: #33465e; line-height: 1.9;
-    box-shadow: 0 2px 10px rgba(0,0,0,.12); display: none;
+    position: absolute; right: 12px; bottom: 14px; z-index: 900; background: #ffffff;
+    border: 1px solid #e3e7ea; border-radius: 8px; padding: 9px 12px; font-size: 11px;
+    color: #4a5057; line-height: 20px; display: none;
   }
-  .dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 6px; }
+  .dot { display: inline-block; width: 6px; height: 6px; border-radius: 3px; margin-right: 7px; }
   #fatal {
     position: absolute; inset: 0; z-index: 1000; display: none; align-items: center;
-    justify-content: center; background: #f6f8fb; color: #4a5d75; font-size: 15px;
-    text-align: center; padding: 40px; line-height: 2;
+    justify-content: center; background: #f0f2f4; color: #4a5057; font-size: 13px;
+    text-align: center; padding: 40px; line-height: 1.9;
   }
-  #fatal b { display: block; font-size: 18px; color: #b3261e; margin-bottom: 10px; }
+  #fatal b { display: block; font-size: 15px; color: #b3261e; margin-bottom: 8px; font-weight: 600; }
   .marker-a, .marker-b, .marker-r {
-    width: 26px; height: 26px; line-height: 26px; border-radius: 50%; color: #fff;
-    text-align: center; font-size: 13px; font-weight: 700; border: 2px solid #fff;
-    box-shadow: 0 2px 8px rgba(0,0,0,.35); cursor: pointer;
+    width: 22px; height: 22px; line-height: 20px; border-radius: 50%; color: #fff;
+    text-align: center; font-size: 12px; font-weight: 500; border: 1px solid #fff;
+    cursor: pointer; box-sizing: border-box;
   }
-  .marker-a { background: #1e88e5; }
-  .marker-b { background: #e53935; }
-  .marker-r { background: #f9a825; color: #402c00; }
-  .marker-r.sel { background: #6a1b9a; color: #fff; transform: scale(1.15); }
-  .iw { font-size: 12px; line-height: 1.7; max-width: 260px; color: #2b3a4a; }
-  .iw b { font-size: 13px; }
-  .iw .leg { color: #455a64; }
+  .marker-a { background: #1d5fbf; }
+  .marker-b { background: #141414; }
+  .marker-r { background: #ffffff; color: #141414; border: 1px solid #141414; font-size: 11px; }
+  .marker-r.sel { background: #141414; color: #ffffff; border-color: #141414; }
+  .iw { font-size: 12px; line-height: 1.6; max-width: 260px; color: #0a0a0a; }
+  .iw b { font-size: 13px; font-weight: 600; }
+  .iw .leg { color: #666c73; }
 </style>
 <script>
   // 安全密钥必须在加载 JS API 之前设置
@@ -62,10 +61,10 @@
 <div id="map"></div>
 <div id="hint"></div>
 <div id="legend">
-  <div><span class="dot" style="background:#1e88e5"></span>A 出发点</div>
-  <div><span class="dot" style="background:#e53935"></span>B 出发点</div>
-  <div><span class="dot" style="background:#f9a825"></span>推荐地点</div>
-  <div><span class="dot" style="background:#26a69a"></span>允许推荐区域</div>
+  <div><span class="dot" style="background:#1d5fbf"></span>A 出发点</div>
+  <div><span class="dot" style="background:#141414"></span>B 出发点</div>
+  <div><span class="dot" style="background:#ffffff;border:1px solid #141414"></span>推荐地点（编号＝排名）</div>
+  <div><span class="dot" style="background:#6b7280"></span>允许推荐区域</div>
 </div>
 <div id="fatal"><div><b>地图加载失败</b>高德 JavaScript API 未能初始化。<br />
   仍可使用文字地址输入与缓存结果，点击「重新加载地图」重试。</div></div>
@@ -162,11 +161,12 @@
     state.circle = new AMap.Circle({
       center: [lng, lat],
       radius: radius,
-      strokeColor: "#26a69a",
-      strokeWeight: 2,
+      strokeColor: "#6b7280",
+      strokeWeight: 1,
+      strokeStyle: "dashed",
       strokeOpacity: 0.9,
-      fillColor: "#26a69a",
-      fillOpacity: 0.14,
+      fillColor: "#6b7280",
+      fillOpacity: 0.08,
       zIndex: 80,
       bubble: true
     });
@@ -186,10 +186,11 @@
     if (!points || points.length < 3) return;
     state.polygon = new AMap.Polygon({
       path: points,
-      strokeColor: "#26a69a",
-      strokeWeight: 2,
-      fillColor: "#26a69a",
-      fillOpacity: 0.16,
+      strokeColor: "#6b7280",
+      strokeWeight: 1,
+      strokeStyle: "dashed",
+      fillColor: "#6b7280",
+      fillOpacity: 0.08,
       zIndex: 80,
       bubble: true
     });
@@ -220,8 +221,8 @@
     state.draftPoints = first ? [[first.lng, first.lat]] : [];
     state.draft = new AMap.Polygon({
       path: state.draftPoints,
-      strokeColor: "#26a69a", strokeWeight: 2, strokeStyle: "dashed",
-      fillColor: "#26a69a", fillOpacity: 0.08, zIndex: 80, bubble: true
+      strokeColor: "#6b7280", strokeWeight: 1, strokeStyle: "dashed",
+      fillColor: "#6b7280", fillOpacity: 0.06, zIndex: 80, bubble: true
     });
     state.draft.setMap(map);
   }
@@ -273,7 +274,10 @@
       marker.setMap(map);
       state.resultMarkers.push(marker);
     });
-    map.setFitView(state.resultMarkers, false, [80, 80, 80, 80]);
+    var fitLayers = state.resultMarkers.slice();
+    if (state.markers.A) fitLayers.push(state.markers.A);
+    if (state.markers.B) fitLayers.push(state.markers.B);
+    map.setFitView(fitLayers, false, [70, 70, 70, 70]);
     document.getElementById("legend").style.display = "block";
   }
 
@@ -294,14 +298,14 @@
     function draw(path, color) {
       if (!path || path.length < 2) return;
       var line = new AMap.Polyline({
-        path: path, strokeColor: color, strokeWeight: 6, strokeOpacity: 0.85,
+        path: path, strokeColor: color, strokeWeight: 4, strokeOpacity: 0.8,
         lineJoin: "round", lineCap: "round", zIndex: 100, showDir: true
       });
       line.setMap(map);
       state.routeLines.push(line);
     }
-    draw(payload.a, "#1e88e5");
-    draw(payload.b, "#e53935");
+    draw(payload.a, "#1d5fbf");
+    draw(payload.b, "#141414");
     if (payload.poi) {
       var iw = new AMap.InfoWindow({
         content: '<div class="iw"><b>' + (payload.name || "推荐地点") + '</b><br/>' +
@@ -365,7 +369,7 @@
     try {
       map = new AMap.Map("map", {
         viewMode: "2D", zoom: 12, center: [117.200983, 39.084158],
-        resizeEnable: true, mapStyle: "amap://styles/normal", showLabel: true
+        resizeEnable: true, mapStyle: "amap://styles/whitesmoke", showLabel: true
       });
       map.addControl(new AMap.Scale());
       map.addControl(new AMap.ToolBar({ position: { right: "18px", bottom: "80px" } }));

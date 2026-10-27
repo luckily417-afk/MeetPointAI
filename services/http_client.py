@@ -123,6 +123,7 @@ class HttpTransport:
         """
         client = await self.client()
         attempt = 0
+        max_retries = max(0, int(max_retries))
         last_exc: BaseException | None = None
         while attempt <= max_retries:
             started = time.perf_counter()
@@ -135,12 +136,13 @@ class HttpTransport:
                 except ValueError:
                     payload = {}
                     if response.status_code < 400:
-                        self.metrics.record(service, latency_ms, False, size)
+                        # 计数交给下面的 except ServiceError 统一处理，避免一次请求记两次
                         raise ServiceError(
                             "响应不是合法 JSON",
                             service=_service_enum(service),
                             state=ServiceState.SERVICE_ERROR,
                             http_status=response.status_code,
+                            retryable=True,
                             detail=redact(response.text[:200]),
                         ) from None
                 if validate is not None:
@@ -154,6 +156,9 @@ class HttpTransport:
                 if not exc.retryable or attempt >= max_retries:
                     raise
                 last_exc = exc
+            except asyncio.CancelledError:
+                # 用户取消/任务取消不能被当成"服务异常"吞掉，否则界面会误报断供
+                raise
             except BaseException as exc:  # noqa: BLE001 - 统一分类
                 latency_ms = int((time.perf_counter() - started) * 1000)
                 state, err_type, retryable = classify_exception(exc)
@@ -191,6 +196,7 @@ class HttpTransport:
     ) -> tuple[dict[str, Any], int, int]:
         client = await self.client()
         attempt = 0
+        max_retries = max(0, int(max_retries))
         last_exc: BaseException | None = None
         while attempt <= max_retries:
             started = time.perf_counter()
@@ -217,6 +223,8 @@ class HttpTransport:
                 if not exc.retryable or attempt >= max_retries:
                     raise
                 last_exc = exc
+            except asyncio.CancelledError:
+                raise
             except BaseException as exc:  # noqa: BLE001
                 latency_ms = int((time.perf_counter() - started) * 1000)
                 state, err_type, retryable = classify_exception(exc)
@@ -267,7 +275,9 @@ async def gather_limited(
         async with semaphore:
             try:
                 results[index] = await coro
-            except BaseException as exc:  # noqa: BLE001
+            except asyncio.CancelledError:
+                raise  # 取消要向上传播，不能伪装成"某个任务失败"
+            except Exception as exc:  # noqa: BLE001
                 results[index] = exc
             finally:
                 async with lock:

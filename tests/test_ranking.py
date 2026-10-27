@@ -14,11 +14,12 @@ def cand(pid: str, dur_a: float, dur_b: float, *, ta: int = 0, tb: int = 0,
     return Candidate(poi=poi, leg_a=leg_a, leg_b=leg_b)
 
 
-def test_total_time_ranking():
-    items = [cand("slow", 1800, 1800), cand("fast", 600, 900), cand("mid", 1200, 1000)]
-    ordered = rank_candidates(items, RankContext(rec_mode=RecMode.TOTAL_TIME), top_n=3)
-    assert [c.poi.id for c in ordered] == ["fast", "mid", "slow"]
-    assert ordered[0].score < ordered[-1].score
+def test_commute_time_does_not_change_recommendation_order():
+    items = [cand("a", 1800, 1800), cand("b", 600, 900)]
+    items[0].poi.rating = 4.8
+    items[1].poi.rating = 4.0
+    ordered = rank_candidates(items, RankContext(rec_mode=RecMode.TOTAL_TIME), top_n=2)
+    assert [c.poi.id for c in ordered] == ["a", "b"]
 
 
 def test_fewest_transfers_ranking():
@@ -47,11 +48,12 @@ def test_unreachable_excluded():
     assert [c.poi.id for c in ordered] == ["ok"]
 
 
-def test_long_walk_penalty():
+def test_walk_length_does_not_affect_ranking():
     normal = cand("normal", 1200, 1200)
     long_walk = cand("walk", 1200, 1200, walk_a=3000)
+    long_walk.poi.rating = 4.7
     ordered = score_candidates([long_walk, normal], RankContext())
-    assert ordered[0].poi.id == "normal"
+    assert ordered[0].poi.id == "walk"
 
 
 def test_to_recommendations_ranks_and_reason():
@@ -60,7 +62,7 @@ def test_to_recommendations_ranks_and_reason():
     assert [r.rank for r in recs] == [1, 2]
     assert all(r.reason for r in recs)
     assert recs[0].source == "rule"
-    assert "分钟" in recs[0].reason
+    assert "双方均可到达" in recs[0].reason
 
 
 def test_no_fairness_metric_in_reason():

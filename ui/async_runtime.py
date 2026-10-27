@@ -43,6 +43,8 @@ class AsyncRuntime(QObject):
             self._loop.run_forever()
         finally:
             try:
+                # 必须显式传入 loop：run_forever 已返回，此时没有 running loop，
+                # asyncio.all_tasks() 会抛 RuntimeError，挂起的任务就永远取消不掉。
                 pending = asyncio.all_tasks(self._loop)
                 for task in pending:
                     task.cancel()

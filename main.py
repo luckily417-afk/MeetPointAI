@@ -3,7 +3,7 @@
 运行：
     python main.py
 打包：
-    pyinstaller meetpoint.spec --noconfirm      # 生成 dist/MeetPointAI/MeetPointAI.exe
+    pyinstaller meetpoint.spec --noconfirm      # 生成 dist/MeetPoint AI/MeetPoint AI.exe
 """
 
 from __future__ import annotations
@@ -23,7 +23,11 @@ def _install_privacy_filter() -> None:
 
     import re
 
-    secret = re.compile(r"(sk-[A-Za-z0-9]{6,}|(?:key|token|secret)=[^&\s]+)", re.IGNORECASE)
+    secret = re.compile(
+        r"(sk-[A-Za-z0-9]{6,}"
+        r"|(?:api[_-]?key|access[_-]?key|key|token|secret|security[_-]?code)=[^&\s,;]+)",
+        re.IGNORECASE,
+    )
 
     class _Filter(logging.Filter):
         def filter(self, record: logging.LogRecord) -> bool:  # noqa: A003
@@ -148,6 +152,7 @@ def main() -> int:
 
     try:
         from PySide6.QtCore import QLocale, Qt
+        from PySide6.QtGui import QFont
         from PySide6.QtWidgets import QApplication, QMessageBox
         from PySide6.QtWebEngineCore import QWebEngineProfile
     except ImportError as exc:  # pragma: no cover - 环境缺失提示
@@ -161,6 +166,17 @@ def main() -> int:
     app.setApplicationName("MeetPoint AI")
     app.setApplicationDisplayName("MeetPoint AI")
     app.setOrganizationName("MeetPoint")
+
+    # 统一控件外观 + 随程序分发的 Geist：QSS 只管颜色和线，几何交给 Fusion
+    from ui.theme import APP_QSS, install_fonts
+
+    app.setStyleSheet(APP_QSS)
+    app.setStyle("Fusion")
+    family = install_fonts()
+    ui_font = QFont()
+    ui_font.setFamilies([family, "Microsoft YaHei UI", "Segoe UI"])
+    ui_font.setPixelSize(13)
+    app.setFont(ui_font)
 
     # 隐私：不持久化浏览数据、不保留地图页缓存
     try:
@@ -204,6 +220,7 @@ def main() -> int:
         def _grab() -> None:
             try:
                 window.prepare_demo_state()
+                app.processEvents()  # 让刚重建的详情面板完成一次布局
                 Path(target).parent.mkdir(parents=True, exist_ok=True)
                 window.grab().save(target)
                 logging.getLogger("meetpoint").info("screenshot saved: %s", target)
@@ -215,11 +232,20 @@ def main() -> int:
     try:
         return app.exec()
     finally:
-        try:
-            if runtime.is_running():
-                runtime.run_sync(transport.aclose(), timeout=5.0)
-        except Exception:  # noqa: BLE001
-            pass
+        # 设置变更会重建服务和连接池：退出时要把「当前」和所有被换下来的连接池都关掉
+        transports = []
+        current = getattr(window, "transport", transport)
+        if current is not None:
+            transports.append(current)
+        for retired in getattr(window, "_retired_transports", []):
+            if retired is not None and retired not in transports:
+                transports.append(retired)
+        for item in transports:
+            try:
+                if runtime.is_running():
+                    runtime.run_sync(item.aclose(), timeout=5.0)
+            except Exception:  # noqa: BLE001
+                pass
         runtime.stop()
         db.close()
 

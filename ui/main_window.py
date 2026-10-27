@@ -6,6 +6,7 @@ import asyncio
 import html
 import json
 import time
+from urllib.parse import quote
 from datetime import datetime, timezone
 from typing import Any, Sequence
 
@@ -34,8 +35,7 @@ from PySide6.QtWidgets import (
     QSizePolicy,
     QSpinBox,
     QSplitter,
-    QTableWidget,
-    QTableWidgetItem,
+    QStackedWidget,
     QTabWidget,
     QTextBrowser,
     QVBoxLayout,
@@ -77,12 +77,32 @@ from services.deepseek import DeepSeekService
 from services.errors import ServiceError
 from storage.db import Database
 from ui.async_runtime import AsyncRuntime
+from ui.detail_pane import DetailPane
 from ui.map_bridge import MapBridge, MapController
 from ui.settings_dialog import SettingsDialog
-from ui.theme import APP_QSS
-from ui.widgets import Banner, RadiusSpinBox, ServicePill
+from ui.results_table import ResultTable
+from ui.theme import APP_QSS, TOKENS
+from ui.widgets import (
+    Banner,
+    ChevronComboBox,
+    ChevronSpinBox,
+    HLine,
+    RadiusSpinBox,
+    SegmentedControl,
+    ServicePill,
+)
 
 __all__ = ["MainWindow"]
+
+
+def _strip_exception_prefix(message: str) -> str:
+    """AsyncRuntime 回传的是「模块名.异常类: 说明」，界面只该显示说明本身。"""
+    head, sep, tail = message.partition(": ")
+    if sep and "Error" in head and "\uff1a" not in head:
+        cleaned = tail.strip()
+        if cleaned:
+            return cleaned
+    return message
 
 
 class MainWindow(QMainWindow):
@@ -126,11 +146,15 @@ class MainWindow(QMainWindow):
         self._last_radius_factor = 1000.0
         self._js_ready = False
         self._last_notice = ""
+        self._retired_transports: list[Any] = []
 
-        self.setWindowTitle("MeetPoint AI · 双人智能见面地点推荐")
+        self.setWindowTitle("MeetPoint AI")
         self.resize(1480, 940)
         self.setMinimumSize(1100, 700)
         self.setStyleSheet(APP_QSS)
+
+        # 上次在界面上设置的推荐数量（sqlite 里存的）要真正生效，否则重启后悄悄变回 .env 的值
+        self.settings = self._restore_session_settings()
 
         self._build_ui()
         self._build_menu()
@@ -161,6 +185,22 @@ class MainWindow(QMainWindow):
     # ================================================================== #
     # 界面搭建
     # ================================================================== #
+    def _restore_session_settings(self) -> Settings:
+        """把上次界面里设置的 top_n 找回来（与「设置」对话框写 .env 的行为保持一致）。"""
+        try:
+            stored = self.db.get_setting("top_n")
+        except Exception:  # noqa: BLE001
+            return self.settings
+        if stored is None:
+            return self.settings
+        try:
+            value = max(1, min(10, int(stored)))
+        except (TypeError, ValueError):
+            return self.settings
+        restored = self.settings.with_overrides(top_n=value)
+        self.pipeline.settings = restored
+        return restored
+
     def _build_ui(self) -> None:
         root = QWidget()
         root.setObjectName("root")
@@ -175,102 +215,191 @@ class MainWindow(QMainWindow):
         self.result_banner = Banner()
         banner_host = QWidget()
         banner_layout = QVBoxLayout(banner_host)
-        banner_layout.setContentsMargins(12, 8, 12, 0)
+        banner_layout.setContentsMargins(20, 8, 20, 0)
         banner_layout.setSpacing(6)
         banner_layout.addWidget(self.banner)
         banner_layout.addWidget(self.result_banner)
         outer.addWidget(banner_host)
 
-        vertical = QSplitter(Qt.Vertical)
-        vertical.setChildrenCollapsible(False)
-        horizontal = QSplitter(Qt.Horizontal)
-        horizontal.setChildrenCollapsible(False)
-        horizontal.addWidget(self._build_left_panel())
-        horizontal.addWidget(self._build_map_panel())
-        horizontal.setStretchFactor(0, 0)
-        horizontal.setStretchFactor(1, 1)
-        horizontal.setSizes([400, 1080])
-        vertical.addWidget(horizontal)
-        vertical.addWidget(self._build_bottom_panel())
-        vertical.setStretchFactor(0, 3)
-        vertical.setStretchFactor(1, 2)
-        vertical.setSizes([620, 300])
-        outer.addWidget(vertical, 1)
+        # 一栏表单 + 一栏地图/结果：左右两栏各自一个左边缘，中间 1px 分隔
+        body = QWidget()
+        body_layout = QHBoxLayout(body)
+        body_layout.setContentsMargins(0, 0, 0, 0)
+        body_layout.setSpacing(0)
+        left = self._build_left_panel()
+        left.setFixedWidth(352)
+        self._form_panel = left
+        body_layout.addWidget(left)
+        body_layout.addWidget(self._build_right_column(), 1)
+        outer.addWidget(body, 1)
 
-        self.statusBar().showMessage("就绪")
+        bar = self.statusBar()
+        bar.setSizeGripEnabled(False)
+        self.status_label = QLabel("就绪")
+        self.status_label.setObjectName("muted")
+        self.status_label.setMinimumWidth(0)
+        bar.addWidget(self.status_label, 1)
         self.metrics_label = QLabel("API 调用 0 次 · 失败 0 次 · Token 0")
-        self.metrics_label.setStyleSheet("color:#6d7d90;font-size:11px;padding-right:8px;")
-        self.statusBar().addPermanentWidget(self.metrics_label)
+        self.metrics_label.setObjectName("meta")
+        self.metrics_label.setStyleSheet("padding-right:12px;")
+        bar.addPermanentWidget(self.metrics_label)
 
+    # ------------------------------------------------------------------ #
     def _build_topbar(self) -> QWidget:
         bar = QFrame()
         bar.setObjectName("topbar")
+        bar.setFixedHeight(48)
         layout = QHBoxLayout(bar)
-        layout.setContentsMargins(14, 8, 14, 8)
+        layout.setContentsMargins(16, 0, 12, 0)
         layout.setSpacing(10)
 
+        from ui.widgets import ProductMark
+
+        layout.addWidget(ProductMark())
         title = QLabel("MeetPoint AI")
-        title.setObjectName("appTitle")
+        title.setObjectName("wordmark")
         layout.addWidget(title)
-        layout.addSpacing(6)
+
+        divider = QLabel()
+        divider.setObjectName("vline")
+        divider.setFixedHeight(16)
+        layout.addWidget(divider)
+
+        self.scope_chip = QLabel("双人见面地点推荐")
+        self.scope_chip.setObjectName("scopeChip")
+        layout.addWidget(self.scope_chip)
+
+        layout.addStretch(1)
 
         short_titles = {"amap_web": "高德 Web", "amap_js": "高德 JS", "deepseek": "DeepSeek"}
         self.pills: dict[str, ServicePill] = {}
-        for name in SERVICE_ORDER:
+        for index, name in enumerate(SERVICE_ORDER):
+            if index:
+                spacer = QLabel("·")
+                spacer.setObjectName("meta")
+                layout.addWidget(spacer)
             pill = ServicePill(short_titles.get(name, name))
             pill.setToolTip(SERVICE_LABELS.get(name, name))
             self.pills[name] = pill
             layout.addWidget(pill)
 
-        layout.addStretch(1)
+        layout.addSpacing(4)
         self.btn_check = QPushButton("立即检测")
+        self.btn_check.setObjectName("quietAction")
         self.btn_check.setToolTip("分别检测高德 Web 服务、高德 JS API、DeepSeek API")
         layout.addWidget(self.btn_check)
         return bar
 
+    # ------------------------------------------------------------------ #
+    def _section(self, title: str, note: str = "") -> tuple[QWidget, QVBoxLayout]:
+        """左栏的一个表单区：小标题 + 内容，无卡片、无序号。"""
+        box = QWidget()
+        layout = QVBoxLayout(box)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(10)
+        head = QLabel(title)
+        head.setObjectName("sectionTitle")
+        layout.addWidget(head)
+        if note:
+            hint = QLabel(note)
+            hint.setObjectName("muted")
+            hint.setWordWrap(True)
+            layout.addWidget(hint)
+        return box, layout
+
+    @staticmethod
+    def _field_label(text: str) -> QLabel:
+        label = QLabel(text)
+        label.setObjectName("fieldLabel")
+        return label
+
+    def _joined_field(self, placeholder: str) -> tuple[QFrame, QLineEdit]:
+        """输入框 + 内嵌动作：共用一个 1px 边框，右侧方形搜索按钮。"""
+        frame = QFrame()
+        frame.setObjectName("joined")
+        row = QHBoxLayout(frame)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(0)
+        edit = QLineEdit()
+        edit.setObjectName("bare")
+        edit.setPlaceholderText(placeholder)
+        edit.setClearButtonEnabled(True)
+        edit.setFrame(False)
+        row.addWidget(edit, 1)
+        return frame, edit
+
+    def _field_block(self, label: str, widget: QWidget, stretch: int = 1) -> QWidget:
+        """标签在上、控件在下（表单控件的高度统一为 32px）。"""
+        host = QWidget()
+        layout = QVBoxLayout(host)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(4)
+        caption = QLabel(label)
+        caption.setObjectName("fieldLabel")
+        layout.addWidget(caption)
+        layout.addWidget(widget)
+        host.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+        _ = stretch
+        return host
+
     def _build_left_panel(self) -> QWidget:
-        container = QWidget()
+        container = QFrame()
+        container.setObjectName("formPanel")
         outer = QVBoxLayout(container)
-        outer.setContentsMargins(12, 10, 6, 10)
-        outer.setSpacing(10)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
 
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         inner = QWidget()
         layout = QVBoxLayout(inner)
-        layout.setContentsMargins(0, 0, 6, 0)
-        layout.setSpacing(10)
+        layout.setContentsMargins(20, 14, 14, 12)
+        layout.setSpacing(14)
 
-        # ---- A/B 位置 ----
-        box_points = QGroupBox("① 双方出发位置")
-        points_layout = QVBoxLayout(box_points)
-        points_layout.setSpacing(8)
-
+        # ---- 出发位置 ---------------------------------------------------- #
+        box_points, points_layout = self._section("出发位置", "名称、地址或 GCJ-02 坐标。")
         for user in ("A", "B"):
-            row = QHBoxLayout()
-            edit = QLineEdit()
-            edit.setPlaceholderText(
-                f"输入 {user} 的地点名称、详细地址，或直接输入 经度,纬度"
-            )
-            edit.setClearButtonEnabled(True)
-            btn_search = QPushButton("搜索")
-            btn_search.setFixedWidth(58)
-            btn_map = QPushButton("地图选点")
-            btn_map.setFixedWidth(78)
+            block = QWidget()
+            block_layout = QVBoxLayout(block)
+            block_layout.setContentsMargins(0, 0, 0, 0)
+            block_layout.setSpacing(4)
+
+            btn_map = QPushButton("在地图上选点")
+            btn_map.setObjectName("textAction")
+            btn_map.setCursor(Qt.PointingHandCursor)
             btn_clear = QPushButton("清除")
-            btn_clear.setFixedWidth(52)
-            label = QLabel(f"{user} 出发地")
-            label.setFixedWidth(60)
-            label.setStyleSheet("font-weight:600;color:#1c3a5e;")
-            row.addWidget(label)
-            row.addWidget(edit, 1)
-            points_layout.addLayout(row)
-            actions = QHBoxLayout()
-            actions.addStretch(1)
-            actions.addWidget(btn_search)
-            actions.addWidget(btn_map)
-            actions.addWidget(btn_clear)
-            points_layout.addLayout(actions)
+            btn_clear.setObjectName("textAction")
+            btn_clear.setCursor(Qt.PointingHandCursor)
+
+            head = QHBoxLayout()
+            head.setContentsMargins(0, 0, 0, 0)
+            head.setSpacing(7)
+            dot = QLabel()
+            dot.setFixedSize(7, 7)
+            dot.setStyleSheet(
+                f"background:{'#1d5fbf' if user == 'A' else '#141414'};border-radius:3px;"
+            )
+            label = QLabel(f"出发地 {user}")
+            label.setObjectName("fieldLabel")
+            head.addWidget(dot)
+            head.addWidget(label)
+            head.addStretch(1)
+            head.addWidget(btn_map)
+            head.addSpacing(4)
+            head.addWidget(btn_clear)
+            block_layout.addLayout(head)
+
+            frame, edit = self._joined_field(f"{user} 的名称、地址或经纬度")
+            btn_search = QPushButton("搜索")
+            btn_search.setObjectName("textAction")
+            btn_search.setCursor(Qt.PointingHandCursor)
+            btn_search.setFixedWidth(48)
+            btn_search.setStyleSheet("border-left:1px solid #edf0f2;border-radius:0;")
+            frame.layout().addWidget(btn_search)
+            block_layout.addWidget(frame)
+
+            points_layout.addWidget(block)
 
             if user == "A":
                 self.a_edit, self.a_btn_search, self.a_btn_map, self.a_btn_clear = (
@@ -286,94 +415,107 @@ class MainWindow(QMainWindow):
                     btn_map,
                     btn_clear,
                 )
-
-        self.point_hint = QLabel("提示：可直接输入经纬度（GCJ-02），例如 117.210089,39.135951")
-        self.point_hint.setWordWrap(True)
-        self.point_hint.setStyleSheet("color:#7a8aa0;font-size:11px;")
-        points_layout.addWidget(self.point_hint)
         layout.addWidget(box_points)
 
-        # ---- 出行与偏好 ----
-        box_pref = QGroupBox("② 出行方式与场所偏好")
-        form = QFormLayout(box_pref)
-        form.setSpacing(8)
-        form.setLabelAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        # ---- 出行与偏好-------------------------------------------------- #
+        box_pref, pref_layout = self._section("出行与偏好")
 
-        self.travel_combo = QComboBox()
+        self.travel_combo = SegmentedControl()
         for value, label in TRAVEL_MODE_LABELS.items():
             self.travel_combo.addItem(label, value)
-        form.addRow("出行方式", self.travel_combo)
+        self.travel_combo.setFixedHeight(32)
+        pref_layout.addWidget(self._field_block("出行方式", self.travel_combo))
 
-        self.category_combo = QComboBox()
+        pair = QHBoxLayout()
+        pair.setContentsMargins(0, 0, 0, 0)
+        pair.setSpacing(10)
+        self.category_combo = ChevronComboBox()
         for name in CATEGORY_PRESETS:
             self.category_combo.addItem(name, name)
-        form.addRow("场所类型", self.category_combo)
-
-        self.keyword_edit = QLineEdit()
-        self.keyword_edit.setPlaceholderText("可选：自定义检索关键词（如 咖啡、火锅）")
-        form.addRow("自定义关键词", self.keyword_edit)
-
-        self.mode_combo = QComboBox()
+        self.category_combo.setFixedHeight(32)
+        pair.addWidget(self._field_block("场所类型", self.category_combo), 1)
+        self.mode_combo = ChevronComboBox()
         for value, label in REC_MODE_LABELS.items():
             self.mode_combo.addItem(label, value)
-        form.addRow("推荐模式", self.mode_combo)
+        self.mode_combo.setFixedHeight(32)
+        pair.addWidget(self._field_block("推荐模式", self.mode_combo), 1)
+        pref_layout.addLayout(pair)
 
-        self.topn_spin = QSpinBox()
-        self.topn_spin.setRange(1, 10)
-        self.topn_spin.setValue(max(1, min(10, self.settings.top_n)))
-        self.topn_spin.setSuffix(" 个")
-        self.topn_spin.setLocale(QLocale.c())
-        self.topn_spin.setToolTip("最终展示的推荐条数（也可在「工具 → 设置」中批量调整检索参数）")
+        self.keyword_edit = QLineEdit()
+        self.keyword_edit.setPlaceholderText("可选，例如 咖啡、火锅")
+        self.keyword_edit.setFixedHeight(32)
+        pref_layout.addWidget(self._field_block("自定义关键词", self.keyword_edit))
 
         self.prefs_edit = QPlainTextEdit()
-        self.prefs_edit.setPlaceholderText(
-            "自然语言偏好，例如：想找安静、适合聊天、人均 80 元以内的咖啡馆，最好离地铁近"
-        )
-        self.prefs_edit.setFixedHeight(76)
-        form.addRow("偏好描述", self.prefs_edit)
+        self.prefs_edit.setPlaceholderText("例如：安静、适合聊天、人均 80 元以内，最好离地铁近")
+        self.prefs_edit.setFixedHeight(58)
+        pref_layout.addWidget(self._field_block("偏好描述", self.prefs_edit))
         layout.addWidget(box_pref)
 
-        # ---- 区域限制 ----
-        box_region = QGroupBox("③ 推荐区域（硬约束）")
-        region_layout = QVBoxLayout(box_region)
-        region_layout.setSpacing(8)
+        # ---- 推荐区域 ---------------------------------------------------- #
+        box_region, region_layout = self._section("推荐区域")
 
-        mode_row = QHBoxLayout()
-        mode_row.addWidget(QLabel("限制模式"))
-        self.region_combo = QComboBox()
+        region_row = QHBoxLayout()
+        region_row.setContentsMargins(0, 0, 0, 0)
+        region_row.setSpacing(10)
+        self.region_combo = ChevronComboBox()
         for value, label in REGION_MODE_LABELS.items():
             self.region_combo.addItem(label, value)
-        mode_row.addWidget(self.region_combo, 1)
-        region_layout.addLayout(mode_row)
+        self.region_combo.setFixedHeight(32)
+        region_row.addWidget(self._field_block("区域限制", self.region_combo), 1)
 
-        radius_row = QHBoxLayout()
-        radius_row.addWidget(QLabel("半径"))
+        radius_host = QWidget()
+        radius_layout = QVBoxLayout(radius_host)
+        radius_layout.setContentsMargins(0, 0, 0, 0)
+        radius_layout.setSpacing(4)
+        radius_caption = QLabel("半径")
+        radius_caption.setObjectName("fieldLabel")
+        radius_layout.addWidget(radius_caption)
+        radius_inputs = QHBoxLayout()
+        radius_inputs.setContentsMargins(0, 0, 0, 0)
+        radius_inputs.setSpacing(6)
         self.radius_spin = RadiusSpinBox()
         self.radius_spin.setValue(3.0)
-        radius_row.addWidget(self.radius_spin, 1)
-        self.radius_unit = QComboBox()
+        self.radius_spin.setFixedHeight(32)
+        radius_inputs.addWidget(self.radius_spin, 1)
+        self.radius_unit = ChevronComboBox()
         self.radius_unit.addItem("千米", 1000.0)
         self.radius_unit.addItem("米", 1.0)
-        self.radius_unit.setFixedWidth(78)
+        self.radius_unit.setFixedHeight(32)
+        self.radius_unit.setFixedWidth(70)
         self.radius_unit.setToolTip("切换半径单位；数值会自动换算，不改变实际范围")
-        radius_row.addWidget(self.radius_unit)
-        self.btn_circle = QPushButton("地图选圆心")
-        radius_row.addWidget(self.btn_circle)
-        region_layout.addLayout(radius_row)
+        radius_inputs.addWidget(self.radius_unit)
+        radius_layout.addLayout(radius_inputs)
+        radius_host.setFixedWidth(158)
+        region_row.addWidget(radius_host)
+        region_layout.addLayout(region_row)
 
-        poly_row = QHBoxLayout()
+        region_actions = QHBoxLayout()
+        region_actions.setContentsMargins(0, 0, 0, 0)
+        region_actions.setSpacing(2)
+        self.btn_circle = QPushButton("在地图上选圆心")
+        self.btn_circle.setObjectName("textAction")
+        self.btn_circle.setCursor(Qt.PointingHandCursor)
         self.btn_polygon = QPushButton("绘制多边形")
-        self.btn_close_poly = QPushButton("闭合多边形")
+        self.btn_polygon.setObjectName("textAction")
+        self.btn_polygon.setCursor(Qt.PointingHandCursor)
+        self.btn_close_poly = QPushButton("闭合")
+        self.btn_close_poly.setObjectName("textAction")
+        self.btn_close_poly.setCursor(Qt.PointingHandCursor)
         self.btn_clear_region = QPushButton("清除区域")
-        self.btn_clear_region.setObjectName("danger")
-        poly_row.addWidget(self.btn_polygon)
-        poly_row.addWidget(self.btn_close_poly)
-        poly_row.addWidget(self.btn_clear_region)
-        region_layout.addLayout(poly_row)
+        self.btn_clear_region.setObjectName("textAction")
+        self.btn_clear_region.setCursor(Qt.PointingHandCursor)
+        self.btn_clear_region.setStyleSheet("color:#b3261e;")
+        region_actions.addWidget(self.btn_circle)
+        region_actions.addStretch(1)
+        region_actions.addWidget(self.btn_polygon)
+        region_actions.addWidget(self.btn_close_poly)
+        region_actions.addWidget(self.btn_clear_region)
+        region_layout.addLayout(region_actions)
 
         self.region_label = QLabel("当前未限制区域（将以 A、B 中点为圆心按默认半径检索）")
+        self.region_label.setObjectName("meta")
         self.region_label.setWordWrap(True)
-        self.region_label.setStyleSheet("color:#44576e;font-size:11px;")
         region_layout.addWidget(self.region_label)
         layout.addWidget(box_region)
 
@@ -382,41 +524,132 @@ class MainWindow(QMainWindow):
         scroll.setWidget(inner)
         outer.addWidget(scroll, 1)
 
-        self.btn_run = QPushButton("智能推荐见面地点")
-        self.btn_run.setObjectName("primary")
-        self.btn_run.setMinimumHeight(42)
+        # ---- 固定在底部的主操作 -------------------------------------------- #
+        footer = QFrame()
+        footer.setObjectName("formFooter")
+        foot = QVBoxLayout(footer)
+        foot.setContentsMargins(20, 10, 14, 14)
+        foot.setSpacing(8)
 
         topn_row = QHBoxLayout()
-        topn_row.addWidget(QLabel("推荐数量"))
+        topn_row.setContentsMargins(0, 0, 0, 0)
+        topn_row.setSpacing(8)
+        topn_row.addWidget(self._field_label("推荐数量"))
+        self.topn_spin = ChevronSpinBox()
+        self.topn_spin.setRange(1, 10)
+        self.topn_spin.setValue(max(1, min(10, self.settings.top_n)))
+        self.topn_spin.setSuffix(" 个")
+        self.topn_spin.setLocale(QLocale.c())
+        self.topn_spin.setFixedWidth(78)
+        self.topn_spin.setToolTip("最终展示的推荐条数（也可在「工具 → 设置」中批量调整检索参数）")
         topn_row.addWidget(self.topn_spin)
         topn_row.addStretch(1)
-        outer.addLayout(topn_row)
-        outer.addWidget(self.btn_run)
         self.btn_cancel = QPushButton("取消当前任务")
+        self.btn_cancel.setObjectName("textAction")
+        self.btn_cancel.setCursor(Qt.PointingHandCursor)
         self.btn_cancel.setEnabled(False)
-        outer.addWidget(self.btn_cancel)
+        topn_row.addWidget(self.btn_cancel)
+        foot.addLayout(topn_row)
+
+        self.btn_run = QPushButton("开始推荐")
+        self.btn_run.setObjectName("primary")
+        self.btn_run.setMinimumHeight(38)
+        self.btn_run.setCursor(Qt.PointingHandCursor)
+        self.btn_run.setToolTip("按当前的出发点、出行方式与区域约束检索见面地点")
+        foot.addWidget(self.btn_run)
+
+        outer.addWidget(footer)
         return container
 
-    def _build_map_panel(self) -> QWidget:
-        panel = QWidget()
-        layout = QVBoxLayout(panel)
-        layout.setContentsMargins(6, 10, 12, 10)
-        layout.setSpacing(6)
+    def _build_right_column(self) -> QWidget:
+        right = QWidget()
+        layout = QVBoxLayout(right)
+        layout.setContentsMargins(20, 16, 20, 12)
+        layout.setSpacing(12)
 
-        toolbar = QHBoxLayout()
+        title_row = QHBoxLayout()
+        title_row.setContentsMargins(0, 0, 0, 0)
+        title_row.setSpacing(12)
+        title_block = QVBoxLayout()
+        title_block.setContentsMargins(0, 0, 0, 0)
+        title_block.setSpacing(4)
+        h1 = QLabel("见面地点")
+        h1.setObjectName("pageTitle")
+        title_block.addWidget(h1)
+        self.scope_label = QLabel("先填好 A、B 两个出发点，再点「开始推荐」。")
+        self.scope_label.setObjectName("pageScope")
+        title_block.addWidget(self.scope_label)
+        title_row.addLayout(title_block, 1)
+        layout.addLayout(title_row)
+
+        self.map_split = QSplitter(Qt.Vertical)
+        self.map_split.setChildrenCollapsible(False)
+        self.map_split.setHandleWidth(1)
+        self.map_split.addWidget(self._build_map_panel())
+        self.map_split.addWidget(self._build_bottom_panel())
+        self.map_split.setStretchFactor(0, 3)
+        self.map_split.setStretchFactor(1, 2)
+        self.map_split.splitterMoved.connect(lambda *_: setattr(self, "_splits_dragged", True))
+        layout.addWidget(self.map_split, 1)
+        return right
+
+    def _size_map_split(self) -> None:
+        """地图与结果、结果与详情按可用空间分配（布局稳定后再设定，避免首次挤出窗口）。"""
+        split = getattr(self, "map_split", None)
+        if split is not None:
+            total = split.height()
+            if total > 0:
+                top = max(240, int(total * 0.52))
+                split.setSizes([top, max(220, total - top)])
+        results = getattr(self, "results_split", None)
+        if results is not None:
+            width = results.width()
+            if width > 0:
+                detail = max(264, min(420, int(width * 0.36)))
+                results.setSizes([max(320, width - detail), detail])
+
+    def resizeEvent(self, event) -> None:  # noqa: N802
+        super().resizeEvent(event)
+        narrow = self.width() < 1280
+        panel = getattr(self, "_form_panel", None)
+        if panel is not None:
+            panel.setFixedWidth(316 if narrow else 352)
+        table = getattr(self, "table", None)
+        if table is not None and getattr(self, "_compact_table", None) != narrow:
+            self._compact_table = narrow
+            table.set_compact(narrow)
+        if not getattr(self, "_splits_dragged", False):
+            QTimer.singleShot(0, self._size_map_split)
+
+    def _build_map_panel(self) -> QWidget:
+        panel = QFrame()
+        panel.setObjectName("panel")
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(1, 1, 1, 1)
+        layout.setSpacing(0)
+
+        toolbar = QFrame()
+        toolbar.setObjectName("panelHeader")
+        toolbar.setFixedHeight(40)
+        row = QHBoxLayout(toolbar)
+        row.setContentsMargins(16, 0, 10, 0)
+        row.setSpacing(8)
         self.map_mode_label = QLabel("地图模式：普通浏览")
-        self.map_mode_label.setStyleSheet("color:#44576e;font-size:11px;")
+        self.map_mode_label.setObjectName("muted")
         btn_fit = QPushButton("全览")
-        btn_fit.setFixedWidth(64)
+        btn_fit.setObjectName("quietAction")
+        btn_fit.setCursor(Qt.PointingHandCursor)
         btn_reload = QPushButton("重新加载地图")
-        toolbar.addWidget(self.map_mode_label)
-        toolbar.addStretch(1)
-        toolbar.addWidget(btn_fit)
-        toolbar.addWidget(btn_reload)
-        layout.addLayout(toolbar)
+        btn_reload.setObjectName("quietAction")
+        btn_reload.setCursor(Qt.PointingHandCursor)
+        row.addWidget(self.map_mode_label)
+        row.addStretch(1)
+        row.addWidget(btn_fit)
+        row.addWidget(btn_reload)
+        layout.addWidget(toolbar)
 
         self.map_view = QWebEngineView()
-        self.map_view.setMinimumSize(320, 240)
+        self.map_view.setMinimumSize(320, 200)
         self.map_view.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.map_bridge = MapBridge(self)
         self.map = MapController(self.map_view, self.map_bridge, self.settings, self)
@@ -427,61 +660,103 @@ class MainWindow(QMainWindow):
         return panel
 
     def _build_bottom_panel(self) -> QWidget:
-        panel = QWidget()
+        panel = QFrame()
+        panel.setObjectName("panel")
         layout = QVBoxLayout(panel)
-        layout.setContentsMargins(12, 0, 12, 10)
-        layout.setSpacing(6)
+        layout.setContentsMargins(1, 1, 1, 1)
+        layout.setSpacing(0)
 
-        progress_row = QHBoxLayout()
+        head = QFrame()
+        head.setObjectName("panelHeader")
+        head_row = QHBoxLayout(head)
+        head_row.setContentsMargins(16, 10, 12, 10)
+        head_row.setSpacing(10)
+        title = QLabel("推荐结果")
+        title.setObjectName("sectionTitle")
+        head_row.addWidget(title)
+        self.summary_label = QLabel("尚未开始")
+        self.summary_label.setObjectName("muted")
+        head_row.addWidget(self.summary_label)
+        head_row.addStretch(1)
+        self.source_label = QLabel("")
+        self.source_label.setObjectName("meta")
+        head_row.addWidget(self.source_label)
+        layout.addWidget(head)
+
         self.progress = QProgressBar()
         self.progress.setLocale(QLocale.c())
         self.progress.setRange(0, 100)
         self.progress.setValue(0)
-        self.progress.setFormat("%p%")
-        self.progress.setFixedHeight(16)
-        self.status_label = QLabel("就绪")
-        self.status_label.setStyleSheet("color:#44576e;font-size:12px;")
-        progress_row.addWidget(self.progress, 1)
-        progress_row.addWidget(self.status_label, 2)
-        layout.addLayout(progress_row)
+        self.progress.setTextVisible(False)
+        self.progress.setFixedHeight(3)
+        self.progress.setVisible(False)
+        layout.addWidget(self.progress)
 
         split = QSplitter(Qt.Horizontal)
-        self.table = QTableWidget(0, 7)
-        self.table.setHorizontalHeaderLabels(["#", "地点", "类型", "A 通勤", "B 通勤", "换乘", "来源"])
-        self.table.verticalHeader().setVisible(False)
-        self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
-        self.table.setSelectionMode(QAbstractItemView.SingleSelection)
-        self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
-        self.table.setAlternatingRowColors(False)
-        header = self.table.horizontalHeader()
-        header.setSectionResizeMode(0, QHeaderView.ResizeToContents)
-        header.setSectionResizeMode(1, QHeaderView.Stretch)
-        header.setSectionResizeMode(2, QHeaderView.ResizeToContents)
-        header.setSectionResizeMode(3, QHeaderView.ResizeToContents)
-        header.setSectionResizeMode(4, QHeaderView.ResizeToContents)
-        header.setSectionResizeMode(5, QHeaderView.ResizeToContents)
-        header.setSectionResizeMode(6, QHeaderView.ResizeToContents)
-        split.addWidget(self.table)
+        split.setChildrenCollapsible(False)
+        split.setHandleWidth(1)
 
+        self.empty_hint = self._build_empty_hint()
+        self.table = ResultTable()
+        self.result_stack = QStackedWidget()
+        self.result_stack.addWidget(self.empty_hint)
+        self.result_stack.addWidget(self.table)
+        self.result_stack.setCurrentWidget(self.empty_hint)
+        split.addWidget(self.result_stack)
+
+        detail_host = QWidget()
+        detail_layout = QVBoxLayout(detail_host)
+        detail_layout.setContentsMargins(16, 6, 12, 10)
+        detail_layout.setSpacing(6)
         self.tabs = QTabWidget()
-        self.detail_view = QTextBrowser()
-        self.detail_view.setOpenExternalLinks(True)
+        self.detail_view = DetailPane()
         self.ai_view = QTextBrowser()
         self.ai_view.setOpenExternalLinks(True)
+        self.ai_view.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.log_view = QPlainTextEdit()
+        self.log_view.setObjectName("log")
         self.log_view.setReadOnly(True)
-        self.log_view.setStyleSheet("font-family:Consolas,monospace;font-size:11px;")
         self.tabs.addTab(self.detail_view, "地点详情")
         self.tabs.addTab(self.ai_view, "AI 分析")
         self.tabs.addTab(self.log_view, "服务日志")
-        split.addWidget(self.tabs)
-        split.setSizes([820, 560])
+        detail_layout.addWidget(self.tabs, 1)
+        detail_host.setMinimumWidth(264)
+        split.addWidget(detail_host)
+
+        split.setStretchFactor(0, 1)
+        split.setStretchFactor(1, 0)
+        split.setCollapsible(0, False)
+        split.setSizes([700, 360])
+        self.results_split = split
+        split.splitterMoved.connect(lambda *_: setattr(self, "_splits_dragged", True))
         layout.addWidget(split, 1)
 
-        self.detail_view.setHtml(
-            "<div style='color:#6d7d90;padding:10px'>选择上方推荐结果查看地点详情、双方路线与导航入口。</div>"
-        )
+
         return panel
+
+    def _build_empty_hint(self) -> QWidget:
+        host = QWidget()
+        layout = QVBoxLayout(host)
+        layout.setContentsMargins(24, 32, 24, 32)
+        layout.setSpacing(8)
+        layout.addStretch(1)
+        title = QLabel("还没有推荐结果")
+        title.setObjectName("sectionTitle")
+        title.setAlignment(Qt.AlignCenter)
+        layout.addWidget(title)
+        hint = QLabel("填好 A、B 两个出发点，选好出行方式与区域，再点左下角的「开始推荐」。")
+        hint.setObjectName("muted")
+        hint.setAlignment(Qt.AlignCenter)
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+        layout.addStretch(1)
+        return host
+
+    @staticmethod
+    def _muted_html(text: str) -> str:
+        return (
+            f"<div style='color:#666c73;font-size:12px;line-height:160%'>{html.escape(text)}</div>"
+        )
 
     def _build_menu(self) -> None:
         menu = self.menuBar()
@@ -526,6 +801,9 @@ class MainWindow(QMainWindow):
         self.b_edit.returnPressed.connect(lambda: self._search_point("B"))
 
         self.region_combo.currentIndexChanged.connect(self._on_region_mode_changed)
+        self.category_combo.currentIndexChanged.connect(lambda _=0: self._update_scope())
+        self.mode_combo.currentIndexChanged.connect(lambda _=0: self._update_scope())
+        self.travel_combo.currentIndexChanged.connect(lambda _=0: self._update_scope())
         self.radius_spin.valueChanged.connect(self._on_radius_changed)
         self.radius_unit.currentIndexChanged.connect(self._on_radius_unit_changed)
         self.topn_spin.valueChanged.connect(self._on_topn_changed)
@@ -553,6 +831,7 @@ class MainWindow(QMainWindow):
         self.health_updated.connect(self._apply_health)
         self.log_line.connect(self._log)
         self.map_failed.connect(self._on_map_failed_ui)
+        self.map.load_timed_out.connect(self._on_map_timeout)
         self.monitor.add_listener(
             lambda name, snap: self.health_updated.emit(name, snap)
         )
@@ -562,8 +841,12 @@ class MainWindow(QMainWindow):
     # ================================================================== #
     def showEvent(self, event) -> None:  # noqa: N802
         super().showEvent(event)
+        if not getattr(self, "_split_sized", False):
+            self._split_sized = True
+            QTimer.singleShot(0, self._size_map_split)
         if not getattr(self, "_map_loaded", False):
             self._map_loaded = True
+            self._map_load_started = time.perf_counter()
             self.map.load()
             QTimer.singleShot(1500, self._startup_checks)
 
@@ -586,8 +869,9 @@ class MainWindow(QMainWindow):
 
     def _periodic_health(self) -> None:
         self.runtime.submit(self.monitor.check_due())
-        if self._js_ready:
-            self.map.ping()
+        # 无条件 ping：页面若只是偶发脚本错误（ready 已上报过），ping 能让状态自动恢复，
+        # 而不是必须由用户手动点「立即检测 / 重新加载地图」。
+        self.map.ping()
 
     # ================================================================== #
     # 健康状态
@@ -604,14 +888,28 @@ class MainWindow(QMainWindow):
             )
         self._update_capabilities()
 
+    def _amap_available(self) -> bool:
+        """能否发起检索：健康（正常/延迟较高），或首次体检还没回来（UNKNOWN）。
+
+        UNKNOWN 只是「尚未检测」，不是「不可用」：按钮在这期间是可点的
+        （见 _update_capabilities），运行入口必须用同一套判断，否则用户点下去
+        只会得到一句「服务当前不可用」。真正的故障会在调用时由服务层报错。
+        """
+        state = self.monitor.state_of("amap_web")
+        return state.is_usable or state is ServiceState.UNKNOWN
+
     def _update_capabilities(self) -> None:
         amap_state = self.monitor.state_of("amap_web")
         js_state = self.monitor.state_of("amap_js")
         ds_state = self.monitor.state_of("deepseek")
 
-        amap_ok = amap_state.is_usable
-        self.btn_run.setEnabled(amap_ok)
-        if not amap_ok:
+        pending = amap_state is ServiceState.UNKNOWN  # 还没做过第一次体检
+        amap_ok = amap_state.is_usable or pending
+        # 运行中不能被健康回写「重新点亮」：否则用户在 AI 阶段点一下就把自己的任务取消了
+        running = bool(self._current_task)
+        self.btn_run.setEnabled(amap_ok and not running)
+        self.btn_cancel.setEnabled(running)
+        if amap_state.is_failure:
             label = STATE_LABELS.get(amap_state.value, amap_state.value)
             detail = self.monitor.snapshot("amap_web").detail
             self.banner.show_message(
@@ -619,6 +917,8 @@ class MainWindow(QMainWindow):
                 f"{('原因：' + detail) if detail else ''} 已缓存结果仅作历史参考，请手动重试。",
                 "error",
             )
+        elif amap_state is ServiceState.NOT_CONFIGURED:
+            self.banner.show_message("未配置高德 Web 服务 API Key，无法检索真实地点。", "error")
         elif ds_state.is_failure:
             self.banner.show_message(
                 "AI 服务不可用，当前为基础推荐模式（本地规则排序，仍使用真实地图数据）。",
@@ -629,11 +929,10 @@ class MainWindow(QMainWindow):
                 "高德 JS API 异常：地图交互受限（点击选点/绘图暂停），仍可使用文字地址输入进行推荐。",
                 "warn",
             )
+        elif pending:
+            self.banner.show_message("正在检测高德服务状态，稍候即可开始推荐…", "info")
         else:
             self.banner.clear()
-
-        if amap_state is ServiceState.NOT_CONFIGURED:
-            self.banner.show_message("未配置高德 Web 服务 API Key，无法检索真实地点。", "error")
 
     def _check_services(self) -> None:
         self.btn_check.setEnabled(False)
@@ -669,7 +968,8 @@ class MainWindow(QMainWindow):
     def _on_map_ready(self, info: dict) -> None:
         self._js_ready = True
         self._js_ping_timer.stop()
-        latency = 0
+        started = getattr(self, "_map_load_started", None)
+        latency = int((time.perf_counter() - started) * 1000) if started else None
         self.monitor.note_js_status(
             True,
             f"地图已初始化（版本 {info.get('version', '2.0')}，zoom={info.get('zoom')}）",
@@ -689,6 +989,15 @@ class MainWindow(QMainWindow):
     def _on_map_failed_ui(self, message: str) -> None:
         if not self._js_ready:
             self.status_label.setText(f"地图不可用：{message}")
+
+    @Slot(str)
+    def _on_map_timeout(self, message: str) -> None:
+        """地图初始化超时 / 页面读取失败：以前这个信号没人接收，用户完全看不到原因。"""
+        self._js_ready = False
+        self.monitor.note_js_status(False, message)
+        self.status_label.setText(f"地图不可用：{message}")
+        self.banner.show_message(f"{message}。仍可用文字地址输入继续推荐。", "warn")
+        self._log(f"地图异常：{message}")
 
     def _on_js_ping_timeout(self) -> None:
         if not self._js_ready:
@@ -720,6 +1029,7 @@ class MainWindow(QMainWindow):
     def _reload_map(self) -> None:
         self._js_ready = False
         self.monitor.reset("amap_js")
+        self._map_load_started = time.perf_counter()
         self.map.reload()
         self._js_ping_timer.start()
         self._log("重新加载地图")
@@ -741,8 +1051,11 @@ class MainWindow(QMainWindow):
         else:
             self._point_b = None
             self.b_edit.clear()
+        # 清掉在飞的地点搜索：否则几百毫秒后它的结果回调会把这个点又填回来
+        self._search_tasks.pop(user, None)
         self.map.clear_point(user)
         self._invalidate_results()
+        self._update_scope()
         self.status_label.setText(f"已清除 {user} 点")
 
     def _search_point(self, user: str) -> None:
@@ -765,8 +1078,8 @@ class MainWindow(QMainWindow):
         self.status_label.setText(f"正在搜索「{text}」…")
         self.runtime.submit(
             self._resolve_point_name(text),
-            on_done=lambda points: self._on_search_done(user, task_id, points),
-            on_error=lambda msg: self._on_search_error(user, task_id, msg),
+            on_done=lambda points, tid=task_id: self._on_search_done(user, tid, points),
+            on_error=lambda msg, tid=task_id: self._on_search_error(user, tid, msg),
             task_id=task_id,
         )
 
@@ -853,6 +1166,7 @@ class MainWindow(QMainWindow):
         self.map.set_point(user, point.lng, point.lat, point.display)
         self.status_label.setText(f"{user} 点：{point.display}（{point.location}）")
         self._invalidate_results()
+        self._update_scope()
 
     @Slot(str, float, float, str)
     def _on_map_point(self, user: str, lng: float, lat: float, source: str) -> None:
@@ -893,6 +1207,7 @@ class MainWindow(QMainWindow):
             self.b_edit.setText(updated.display)
         self.map.set_point(user, updated.lng, updated.lat, updated.display)
         self.status_label.setText(f"{user} 点：{updated.display}")
+        self._update_scope()
 
     # ================================================================== #
     # 区域
@@ -905,6 +1220,7 @@ class MainWindow(QMainWindow):
         return None
 
     def _on_region_mode_changed(self) -> None:
+        QTimer.singleShot(0, self._update_scope)
         mode = RegionMode(self.region_combo.currentData())
         self._region_mode = mode
         region = self._active_region()
@@ -1052,6 +1368,8 @@ class MainWindow(QMainWindow):
             return
         self._polygon = polygon
         self.region_label.setText(polygon.describe())
+        # 协程运行在后台线程，通过队列信号回到 GUI 线程写日志
+        self._invalidate_results()
 
     @Slot(list)
     def _on_polygon_closed(self, points: list) -> None:
@@ -1082,7 +1400,7 @@ class MainWindow(QMainWindow):
         if not self._point_a or not self._point_b:
             self._warn("请先设置 A、B 两人的出发位置")
             return
-        if not self.monitor.usable("amap_web"):
+        if not self._amap_available():
             self._warn("地图数据服务当前不可用，无法检索真实地点；请先点击「立即检测」或稍后重试。")
             return
 
@@ -1113,9 +1431,10 @@ class MainWindow(QMainWindow):
 
         self._cancel_active(silent=True)
         self._results = []
-        self.table.setRowCount(0)
+        self.table.set_results([])
+        self.result_stack.setCurrentWidget(self.empty_hint)
         self.map.clear_results()
-        self.detail_view.clear()
+        self.detail_view.show_empty("输入变更后旧结果已失效，重新推荐后这里会显示两端路线。")
         self.ai_view.clear()
         self.result_banner.clear()
 
@@ -1135,8 +1454,10 @@ class MainWindow(QMainWindow):
         )
         self.runtime.submit(
             coro,
-            on_done=self._on_results,
-            on_error=self._on_pipeline_error,
+            # 回调必须带上 task_id：旧任务的 settle 是异步到达的，
+            # 不能让它把刚开始的新任务状态清掉。
+            on_done=lambda result, tid=task_id: self._on_results(tid, result),
+            on_error=lambda msg, tid=task_id: self._on_pipeline_error(tid, msg),
             task_id=task_id,
         )
 
@@ -1160,37 +1481,55 @@ class MainWindow(QMainWindow):
             self.runtime.cancel(self._current_task)
             self._current_task = None
         self.btn_cancel.setEnabled(False)
-        self.btn_run.setEnabled(self.monitor.usable("amap_web"))
+        self.btn_run.setEnabled(self._amap_available())
         if not silent:
             self.progress.setValue(0)
+            self.progress.setVisible(False)
             self.status_label.setText("已取消当前任务")
+
+    def _hide_progress_if_idle(self) -> None:
+        """900ms 后收起进度条；期间若已开始新任务，不能把新进度条藏起来。"""
+        if not self._current_task:
+            self.progress.hide()
 
     @Slot(str, int, str)
     def _on_progress(self, task_id: str, percent: int, message: str) -> None:
         if task_id != self._current_task:
             return
+        self.progress.setVisible(True)
         self.progress.setValue(max(0, min(100, percent)))
         self.status_label.setText(message)
         if percent in (0, 10, 48, 80, 100):
             self._log(f"[{percent}%] {message}")
 
-    def _on_results(self, result) -> None:
+    def _on_results(self, task_id: str, result) -> None:
+        if task_id != self._current_task:
+            return  # 旧任务的迟到结果，不能覆盖当前任务
         self._current_task = None
         self._cancel_token = None
         self.btn_cancel.setEnabled(False)
-        self.btn_run.setEnabled(self.monitor.usable("amap_web"))
+        self.btn_run.setEnabled(self._amap_available())
         self._results = list(result.recommendations)
         self.progress.setValue(100)
+        QTimer.singleShot(900, self._hide_progress_if_idle)
 
         if not self._results:
             self.status_label.setText(NO_RESULT_MESSAGE)
             self.result_banner.show_message(NO_RESULT_MESSAGE, "warn")
             return
 
+        pool_detail = f"候选 {result.candidates_considered} 个 · 双方可达 {result.stats.get('routed', 0)} 个"
+        if result.source == "ai":
+            pool_detail += f" · AI 分批比较（每批至多 {self.settings.ai_candidate_limit} 个）"
         self.status_label.setText(
-            f"完成：{len(self._results)} 个推荐 · 候选 {result.candidates_considered} 个 · "
+            f"完成：{len(self._results)} 个推荐 · {pool_detail} · "
             f"用时 {result.elapsed_s}s · 来源 {'AI' if result.source == 'ai' else '本地规则'}"
         )
+        self.summary_label.setText(
+            f"{len(self._results)} 个 · {pool_detail} · 用时 {result.elapsed_s}s"
+        )
+        self.source_label.setText("AI 综合推荐" if result.source == "ai" else "本地规则 · 降级")
+        self._update_scope()
         if result.notice:
             self.result_banner.show_message(result.notice, "warn")
         else:
@@ -1206,17 +1545,21 @@ class MainWindow(QMainWindow):
             f"stats={json.dumps(result.stats, ensure_ascii=False)[:300]}"
         )
 
-    def _on_pipeline_error(self, message: str) -> None:
+    def _on_pipeline_error(self, task_id: str, message: str) -> None:
+        if task_id != self._current_task:
+            return  # 旧任务的取消/失败回调，忽略
         self._current_task = None
         self._cancel_token = None
         self.btn_cancel.setEnabled(False)
-        self.btn_run.setEnabled(self.monitor.usable("amap_web"))
+        self.btn_run.setEnabled(self._amap_available())
         if message == "__cancelled__":
             self.progress.setValue(0)
+            self.progress.setVisible(False)
             self.status_label.setText("任务已取消")
             return
         self.progress.setValue(0)
-        clean = message.split(":", 1)[-1].strip() if message.startswith("RecommendationError") else message
+        self.progress.setVisible(False)
+        clean = _strip_exception_prefix(message)
         self.status_label.setText(f"推荐失败：{clean}")
         self.result_banner.show_message(clean, "error")
         self._log(f"推荐失败：{message}")
@@ -1224,24 +1567,36 @@ class MainWindow(QMainWindow):
             self._warn(NO_RESULT_MESSAGE)
 
     def _fill_table(self, items: Sequence[Recommendation]) -> None:
-        self.table.setRowCount(len(items))
-        for row, item in enumerate(items):
-            leg_a, leg_b = item.leg_a, item.leg_b
-            values = [
-                str(item.rank),
-                item.poi.name,
-                item.poi.type_name.split(";")[-1] if item.poi.type_name else "—",
-                leg_a.text if leg_a else "—",
-                leg_b.text if leg_b else "—",
-                str((leg_a.transfers if leg_a and leg_a.ok else 0) + (leg_b.transfers if leg_b and leg_b.ok else 0)),
-                "AI" if item.source == "ai" else "规则",
-            ]
-            for col, text in enumerate(values):
-                cell = QTableWidgetItem(text)
-                if col in (0, 3, 4, 5, 6):
-                    cell.setTextAlignment(Qt.AlignCenter)
-                cell.setToolTip(item.reason or item.poi.address)
-                self.table.setItem(row, col, cell)
+        self.table.set_results(items)
+        self.result_stack.setCurrentWidget(self.table if items else self.empty_hint)
+
+    def _update_scope(self) -> None:
+        """标题下那一行：没有结果时说清本次检索范围，有结果时说出最值得看的一条发现。"""
+        if self._results:
+            best = self._results[0]
+            leg_a, leg_b = best.leg_a, best.leg_b
+            parts = [f"最佳 {best.poi.name}"]
+            if leg_a and leg_a.ok and leg_b and leg_b.ok:
+                total = leg_a.duration_min + leg_b.duration_min
+                gap = abs(leg_a.duration_min - leg_b.duration_min)
+                parts.append(f"两端共 {total:.0f} 分钟")
+                parts.append(f"相差 {gap:.0f} 分钟" if gap >= 1 else "双方用时一致")
+            parts.append(f"{len(self._results)} 个候选")
+            self.scope_label.setText(" · ".join(parts))
+            return
+        a = self._point_a.display if self._point_a else "A 未设置"
+        b = self._point_b.display if self._point_b else "B 未设置"
+        travel = TRAVEL_MODE_LABELS.get(str(self.travel_combo.currentData()), "公共交通")
+        category = self.category_combo.currentData() or "任意类型"
+        self.scope_label.setText(f"{a} → {b} · {travel} · {category} · {self._region_brief()}")
+
+    def _region_brief(self) -> str:
+        """标题行里的区域描述要短：细节留给左栏的区域说明。"""
+        if self._region_mode is RegionMode.CIRCLE and self._circle is not None:
+            return f"{self._circle.radius_m / 1000:.1f} 公里圆形区域"
+        if self._region_mode is RegionMode.POLYGON and self._polygon is not None:
+            return f"多边形区域（{len(self._polygon.points)} 个顶点）"
+        return "不限制区域"
 
     def _render_results_on_map(self) -> None:
         items = [
@@ -1257,42 +1612,74 @@ class MainWindow(QMainWindow):
         self.map.show_results(items)
 
     def _render_ai(self, result) -> None:
-        parts: list[str] = []
+        stats = result.stats or {}
+        source = "DeepSeek AI 综合推荐" if result.source == "ai" else "本地规则排序（降级模式）"
+        cells = [
+            (str(result.candidates_considered), "个候选"),
+            (str(stats.get("routed", 0)), "个双方可达"),
+            (f"{result.elapsed_s:g}", "秒"),
+            (str(stats.get("api_calls", 0)), "次 API 调用"),
+        ]
+        parts = ["<div style='font-size:12px;color:#666c73'>"]
         parts.append(
-            f"<div style='font-family:Microsoft YaHei;font-size:13px;line-height:1.8'>"
-            f"<h3 style='margin:4px 0;color:#14304f'>推荐分析</h3>"
-            f"<p><b>来源：</b>{'DeepSeek AI 综合推荐' if result.source == 'ai' else '本地规则排序（降级模式）'}<br/>"
-            f"<b>候选数量：</b>{result.candidates_considered}<br/>"
-            f"<b>区域约束：</b>{html.escape(result.region_desc)}<br/>"
-            f"<b>耗时：</b>{result.elapsed_s} 秒</p>"
+            "<table cellspacing='0' cellpadding='0' width='100%'><tr>"
+            + "".join(
+                f"<td width='25%'><span style='font-size:20px;color:#0a0a0a'>{value}</span>"
+                f"<span style='font-size:11px;color:#666c73'> {unit}</span></td>"
+                for value, unit in cells
+            )
+            + "</tr></table>"
         )
+        parts.append(f"<p style='margin:6px 0 0'>来源：{source}</p>")
+        parts.append(f"<p style='margin:2px 0 16px'>区域约束：{html.escape(result.region_desc)}</p>")
+
         if result.notice:
             parts.append(
-                f"<p style='background:#fff6e5;border:1px solid #f0dcae;border-radius:6px;"
-                f"padding:8px;color:#8a5a00'>{html.escape(result.notice)}</p>"
+                "<p style='background:#fffbeb;border:1px solid #f3e2ad;padding:8px;"
+                f"color:#92400e'>{html.escape(result.notice)}</p>"
             )
         if result.ai_summary:
-            parts.append(f"<p style='white-space:pre-wrap'>{html.escape(result.ai_summary)}</p>")
+            parts.append("<p style='margin:0 0 4px;color:#666c73'>分析摘要</p>")
+            parts.append(
+                f"<p style='margin:0 0 16px;color:#0a0a0a;font-size:12px'>{html.escape(result.ai_summary)}</p>"
+            )
         if result.warnings:
-            parts.append("<p><b>提示：</b>" + "；".join(html.escape(w) for w in result.warnings) + "</p>")
-        stats = result.stats or {}
+            parts.append(
+                "<p style='margin:0 0 12px;color:#92400e'>"
+                + "<br>".join(html.escape(w) for w in result.warnings)
+                + "</p>"
+            )
         if stats:
             parts.append(
-                "<p style='color:#5b6b80;font-size:12px'>检索分块 {tiles} 块 · API 调用 {calls} 次 · "
-                "原始 {raw} 条 · 去重后 {uniq} 条 · 区域内 {inside} 条 · 可达 {routed} 条</p>".format(
+                "<p style='margin:0 0 16px'>检索分块 {tiles} 块 · 原始 {raw} 条 · 去重后 {uniq} 条 · "
+                "区域内 {inside} 条 · 可达 {routed} 条</p>".format(
                     tiles=stats.get("tiles", 0),
-                    calls=stats.get("api_calls", 0),
                     raw=stats.get("raw_pois", 0),
                     uniq=stats.get("unique_pois", 0),
                     inside=stats.get("in_region", 0),
                     routed=stats.get("routed", 0),
                 )
             )
-        for rec in self._results:
-            parts.append(
-                f"<h4 style='margin:14px 0 4px;color:#1b4c8f'>{rec.rank}. {html.escape(rec.poi.name)}</h4>"
-                f"<div style='color:#33465e'>{html.escape(rec.reason)}</div>"
-            )
+
+        if self._results:
+            parts.append("<p style='margin:0 0 6px;color:#666c73'>逐条理由</p>")
+            for rec in self._results:
+                leg_a, leg_b = rec.leg_a, rec.leg_b
+                meta = ""
+                if leg_a and leg_a.ok and leg_b and leg_b.ok:
+                    meta = (
+                        f"A {leg_a.duration_min:.0f} 分 / B {leg_b.duration_min:.0f} 分 · "
+                        f"共 {leg_a.duration_min + leg_b.duration_min:.0f} 分"
+                    )
+                parts.append(
+                    "<table cellspacing='0' cellpadding='0' width='100%'><tr>"
+                    f"<td width='22' valign='top'><span style='font-size:12px'>{rec.rank}</span></td>"
+                    "<td><span style='font-size:13px;color:#0a0a0a'>"
+                    f"{html.escape(rec.poi.name)}</span><br/>"
+                    f"<span style='font-size:11px;color:#666c73'>{html.escape(meta)}</span><br/>"
+                    f"<span style='font-size:12px;color:#0a0a0a'>{html.escape(rec.reason)}</span>"
+                    "</td></tr><tr><td height='14'></td><td></td></tr></table>"
+                )
         parts.append("</div>")
         self.ai_view.setHtml("".join(parts))
 
@@ -1305,67 +1692,8 @@ class MainWindow(QMainWindow):
 
     def _show_detail(self, index: int) -> None:
         rec = self._results[index]
-        poi = rec.poi
-        nav_url = (
-            f"https://uri.amap.com/marker?position={poi.lng:.6f},{poi.lat:.6f}"
-            f"&name={poi.name}&src=meetpoint&coordinate=gaode&callnative=1"
-        )
-        route_url = (
-            f"https://uri.amap.com/navigation?from={self._point_a.lng:.6f},{self._point_a.lat:.6f},A"
-            f"&to={poi.lng:.6f},{poi.lat:.6f},{poi.name}"
-            f"&mode={'bus' if (rec.leg_a and rec.leg_a.mode is TravelMode.TRANSIT) else 'car'}"
-            f"&policy=1&src=meetpoint&coordinate=gaode&callnative=1"
-        )
-        rows = [
-            f"<h3 style='margin:2px 0;color:#14304f'>{html.escape(poi.name)}</h3>",
-            f"<p style='color:#5b6b80;margin:2px 0 8px'>{html.escape(poi.address or '地址未提供')}"
-            f" · {html.escape(poi.type_name or '类型未知')}</p>",
-            "<table cellspacing='0' cellpadding='4' style='font-size:12px;color:#33465e'>",
-        ]
-        rows.append(
-            f"<tr><td style='color:#7a8aa0'>POI ID</td><td>{html.escape(poi.id)}</td></tr>"
-            f"<tr><td style='color:#7a8aa0'>坐标 (GCJ-02)</td><td>{poi.lng:.6f}, {poi.lat:.6f}</td></tr>"
-            f"<tr><td style='color:#7a8aa0'>商圈</td><td>{html.escape(poi.business_area or '—')}</td></tr>"
-            f"<tr><td style='color:#7a8aa0'>高德评分</td><td>{poi.rating if poi.rating is not None else '—'}</td></tr>"
-            f"<tr><td style='color:#7a8aa0'>人均消费</td><td>{poi.cost if poi.cost is not None else '—'}</td></tr>"
-            f"<tr><td style='color:#7a8aa0'>电话</td><td>{html.escape(poi.tel or '—')}</td></tr>"
-        )
-        rows.append("</table>")
-
-        for title, leg in (("A 出发", rec.leg_a), ("B 出发", rec.leg_b)):
-            rows.append(f"<h4 style='margin:10px 0 4px;color:#1b4c8f'>{title}路线</h4>")
-            rows.append(self._leg_html(leg))
-
-        if rec.reason:
-            rows.append(
-                f"<h4 style='margin:10px 0 4px;color:#1b4c8f'>推荐理由</h4>"
-                f"<p style='color:#33465e'>{html.escape(rec.reason)}</p>"
-            )
-        rows.append(
-            f"<p style='margin-top:10px'><a href='{nav_url}'>在高德地图中查看该地点</a> · "
-            f"<a href='{route_url}'>从 A 出发导航</a></p>"
-        )
-        self.detail_view.setHtml("".join(rows))
-
-    @staticmethod
-    def _leg_html(leg: RouteLeg | None) -> str:
-        if leg is None:
-            return "<p style='color:#a3261e'>无路线数据</p>"
-        if not leg.ok:
-            return (
-                f"<p style='color:#a3261e'>路线不可达：{html.escape(leg.error or '未知原因')}</p>"
-            )
-        cache_note = (
-            f"<span style='color:#8a5a00'>（缓存于 {leg.cached_at.astimezone().strftime('%H:%M:%S') if leg.cached_at else '未知'}，非实时）</span>"
-            if leg.cached
-            else ""
-        )
-        steps = "".join(f"<li>{html.escape(s)}</li>" for s in leg.steps[:8])
-        return (
-            f"<p style='color:#33465e;margin:2px 0'>{html.escape(leg.summary)} {cache_note}<br/>"
-            f"距离 {leg.distance_km:.2f} 公里 · 预计 {leg.duration_min:.0f} 分钟 · "
-            f"换乘 {leg.transfers} 次 · 步行 {leg.walk_m / 1000:.1f} 公里</p>"
-            + (f"<ol style='font-size:12px;color:#5b6b80;margin:4px 0 4px 18px'>{steps}</ol>" if steps else "")
+        self.detail_view.show_recommendation(
+            rec, self._point_a, self._point_b, lambda url: QDesktopServices.openUrl(QUrl(url))
         )
 
     def _select_result_index(self, index: int) -> None:
@@ -1377,22 +1705,30 @@ class MainWindow(QMainWindow):
         row = self.table.currentRow()
         if 0 <= row < len(self._results):
             poi = self._results[row].poi
+            name = quote(poi.name, safe="")
             QDesktopServices.openUrl(
                 QUrl(
                     f"https://uri.amap.com/marker?position={poi.lng:.6f},{poi.lat:.6f}"
-                    f"&name={poi.name}&src=meetpoint&coordinate=gaode&callnative=1"
+                    f"&name={name}&src=meetpoint&coordinate=gaode&callnative=1"
                 )
             )
 
     def _invalidate_results(self) -> None:
         if self._current_task:
             self._cancel_active(silent=True)
+            # 旧任务的完成回调会因为 task_id 不匹配被丢弃，进度条必须在这里自己收回去
+            self.progress.setValue(0)
+            self.progress.setVisible(False)
         if self._results:
             self._results = []
-            self.table.setRowCount(0)
+            self.table.set_results([])
+            self.result_stack.setCurrentWidget(self.empty_hint)
             self.map.clear_results()
-            self.detail_view.clear()
+            self.detail_view.show_empty()
             self.ai_view.clear()
+            self.summary_label.setText("输入已变更，请重新推荐")
+            self.source_label.setText("")
+            self._update_scope()
             self.status_label.setText("输入已变更，旧推荐已失效，请重新点击「智能推荐」")
 
     # ================================================================== #
@@ -1474,19 +1810,28 @@ class MainWindow(QMainWindow):
 
         self._log(
             "设置已更新："
-            + ", ".join(f"{k}={v if 'key' not in k and 'secret' not in k else '***'}" for k, v in changes.items())
+            + ", ".join(f"{k}={self._mask_setting(k, v)}" for k, v in changes.items())
         )
         if saved_path:
             self._log(f"配置已写入 {saved_path}")
             self.status_label.setText(f"设置已保存到 {saved_path.name}，正在按新配置重建服务…")
 
+    @staticmethod
+    def _mask_setting(name: str, value: Any) -> Any:
+        """日志脱敏：凭据字段一律不落盘（amap_js_security_code 这种名字也含 code/key）。"""
+        lowered = str(name).lower()
+        if any(token in lowered for token in ("key", "secret", "code", "token", "password")):
+            return "***"
+        return value
+
     def _rebuild_services(self, js_changed: bool) -> None:
-        old_transport = getattr(self.amap, "_transport", None)
+        # 先停掉在跑的推荐：它还在用旧连接池，直接关掉会让请求报
+        # "Cannot send a request, as the client has been closed"
+        self._cancel_active(silent=True)
+        old_transport = getattr(self.amap, "transport", None)
         if old_transport is not None:
-            try:
-                self.runtime.submit(old_transport.aclose())
-            except Exception:  # noqa: BLE001
-                pass
+            # 旧连接池不立刻关：可能还有排队的请求，留到退出时统一收尾
+            self._retired_transports.append(old_transport)
 
         transport, amap, deepseek, monitor = build_services(self.settings, self.db)
         self.transport = transport
@@ -1499,8 +1844,11 @@ class MainWindow(QMainWindow):
         if js_changed:
             self._js_ready = False
             self.monitor.reset("amap_js")
+            self.map.update_settings(self.settings)  # 新 Key/安全密钥必须注入到页面
             self.map.reload()
             self._js_ping_timer.start()
+        else:
+            self.map.update_settings(self.settings)
 
         self._update_capabilities()
         self._check_services()
@@ -1525,9 +1873,14 @@ class MainWindow(QMainWindow):
         self._polygon = None
         self.map.clear_region()
         self.map.clear_results()
-        self.table.setRowCount(0)
+        self.table.set_results([])
+        self.result_stack.setCurrentWidget(self.empty_hint)
         self._results = []
+        self.summary_label.setText("尚未开始")
+        self.source_label.setText("")
+        self.detail_view.show_empty()
         self.region_label.setText("当前未限制区域（将以 A、B 中点为圆心按默认半径检索）")
+        self._update_scope()
         self.status_label.setText("就绪")
 
     def _clear_history(self) -> None:
@@ -1542,9 +1895,10 @@ class MainWindow(QMainWindow):
             return
         self.db.clear_all()
         self._results = []
-        self.table.setRowCount(0)
+        self.table.set_results([])
+        self.result_stack.setCurrentWidget(self.empty_hint)
         self.map.clear_results()
-        self.detail_view.clear()
+        self.detail_view.show_empty()
         self.ai_view.clear()
         self.status_label.setText("历史数据与缓存已清除")
         self._log("已清除本地历史数据与缓存")
@@ -1587,10 +1941,11 @@ class MainWindow(QMainWindow):
         QMessageBox.information(
             self,
             "关于 MeetPoint AI",
-            "MeetPoint AI 1.0\n\n"
+            "MeetPoint AI 1.0 · 双人智能见面地点推荐\n\n"
             "• 高德地图提供真实 POI、坐标、路线与交通数据\n"
             "• DeepSeek 负责需求理解、候选比较与推荐理由\n"
-            "• Python 负责几何硬约束校验与确定性排序\n\n"
+            "• Python 负责几何硬约束校验与确定性排序\n"
+            "• 命令行：meetpoint-debug（--help 查看全部命令）\n\n"
             f"数据目录：{self.settings.data_dir}\n"
             f"高德 Key：{self.settings.masked()['amap_web_key']}\n"
             f"DeepSeek Key：{self.settings.masked()['deepseek_api_key']}\n"

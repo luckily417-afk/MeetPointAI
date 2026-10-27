@@ -28,7 +28,7 @@ def test_valid_response(candidates):
     raw = {
         "summary": "综合通勤与氛围推荐",
         "items": [
-            {"poi_id": "B002", "rank": 1, "reason": "双方均在 20 分钟内到达"},
+            {"poi_id": "B002", "rank": 1, "reason": "环境氛围符合偏好"},
             {"poi_id": "B001", "rank": 2, "reason": "A 步行更短"},
         ],
     }
@@ -72,6 +72,13 @@ def test_rejects_coordinates_in_reason(candidates):
     assert "坐标" in result.error_text
 
 
+def test_rejects_commute_based_reason(candidates):
+    raw = {"items": [{"poi_id": "B001", "rank": 1, "reason": "通勤时间最短"}]}
+    result = validate_ai_payload(raw, candidates, top_n=1)
+    assert not result.ok
+    assert "通勤" in result.error_text
+
+
 def test_rejects_empty_payload(candidates):
     assert not validate_ai_payload(None, candidates).ok
     assert not validate_ai_payload({}, candidates).ok
@@ -113,3 +120,4 @@ def test_messages_contain_hard_constraints(candidates):
     assert "硬性规则" in system
     assert "上一次" in system
     assert "candidates" in messages[1]["content"]
+    assert "duration_min" not in messages[1]["content"]

@@ -22,6 +22,7 @@ from geometry.regions import Region
 __all__ = ["ValidationResult", "validate_ai_payload", "build_ai_messages", "AIValidationError"]
 
 _COORD_PATTERN = re.compile(r"\d{2,3}\.\d{3,}\s*[,，]\s*\d{1,2}\.\d{3,}")
+_COMMUTE_REASON_PATTERN = re.compile(r"通勤|车程|路程|耗时|\d+\s*分钟|最短|最快|换乘")
 
 
 class AIValidationError(ValueError):
@@ -75,6 +76,10 @@ def validate_ai_payload(
             errors.append(f"AI 在理由中自行写入坐标：{item.poi_id}")
             dropped.append(item.poi_id)
             continue
+        if _COMMUTE_REASON_PATTERN.search(item.reason or ""):
+            errors.append(f"AI 使用通勤信息作为推荐理由：{item.poi_id}")
+            dropped.append(item.poi_id)
+            continue
         cand = known[item.poi_id]
         if region is not None and not region.contains(cand.poi.lng, cand.poi.lat):
             errors.append(f"AI 推荐了区域外的地点：{cand.poi.name}")
@@ -89,10 +94,13 @@ def validate_ai_payload(
     valid.sort(key=lambda i: (i.rank if i.rank > 0 else 999, i.poi_id))
     if len(valid) > top_n:
         valid = valid[:top_n]
+    summary = (parsed.summary or "").strip()[:300]
+    if _COMMUTE_REASON_PATTERN.search(summary):
+        summary = "已按地点信息和用户偏好筛选，通勤数据仅用于确认双方可达。"
     return ValidationResult(
         ok=True,
         items=valid,
-        summary=(parsed.summary or "").strip()[:300],
+        summary=summary,
         errors=errors,
         dropped=dropped,
     )
@@ -115,7 +123,7 @@ def build_ai_messages(
         "1) items 中每个 poi_id 必须逐字来自 candidates 的 poi_id，不得改写、不得新增；\n"
         "2) rank 从 1 开始且不重复，最多推荐 N 个（见 top_n）；\n"
         "3) reason 中不得出现坐标数字，不得声称任何 candidates 未提供的设施或营业状态；\n"
-        "4) 只能基于 candidates 里的 route/time 字段比较通勤，不得自行推算；\n"
+        "4) 通勤时间、路线距离及出发点远近不得用于筛选、排序或推荐理由；候选均已验证双方可达；\n"
         "5) 用户的地理范围是硬约束，你无权扩大或忽略；\n"
         "6) 若候选不足，宁可少给，不得凑数。\n"
         "只输出 JSON，不要 markdown 代码围栏，不要额外解释。"
@@ -153,8 +161,7 @@ def candidate_payload(
             "business_area": cand.poi.business_area,
             "rating": cand.poi.rating,
             "cost_per_person": cand.poi.cost,
-            "route_a": _leg_dict(cand.leg_a),
-            "route_b": _leg_dict(cand.leg_b),
+            "both_sides_reachable": cand.routes_ok,
         }
         items.append(item)
     return {
@@ -175,15 +182,3 @@ def candidate_payload(
     }
 
 
-def _leg_dict(leg) -> dict[str, Any] | None:
-    if leg is None:
-        return None
-    return {
-        "mode": leg.mode.value,
-        "ok": leg.ok,
-        "duration_min": leg.duration_min if leg.ok else None,
-        "distance_km": leg.distance_km if leg.ok else None,
-        "transfers": leg.transfers if leg.ok else None,
-        "walk_m": round(leg.walk_m) if leg.ok else None,
-        "error": leg.error or None,
-    }

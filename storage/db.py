@@ -86,6 +86,13 @@ class Database:
             try:
                 yield cur
                 self._conn.commit()
+            except BaseException:
+                # 中途失败必须回滚：否则这条未提交事务会被下一次 commit 顺手落盘
+                try:
+                    self._conn.rollback()
+                except sqlite3.Error:
+                    pass
+                raise
             finally:
                 cur.close()
 

@@ -1,0 +1,21 @@
+{
+  "name": "天津站周边多边形区域",
+  "a": "天津站",
+  "b": "天津大学",
+  "travel_mode": "walking",
+  "category": "公园",
+  "prefs": "适合散步",
+  "region": {
+    "mode": "polygon",
+    "points": [
+      [117.1950, 39.1250],
+      [117.2300, 39.1250],
+      [117.2300, 39.1500],
+      [117.2050, 39.1500],
+      [117.1950, 39.1380]
+    ]
+  },
+  "top_n": 5,
+  "rec_mode": "total_time",
+  "budget": { "max_api_calls": 400, "max_tokens": 0, "timeout_s": 60 }
+}

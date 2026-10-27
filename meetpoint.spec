@@ -1,5 +1,5 @@
 # -*- mode: python ; coding: utf-8 -*-
-"""PyInstaller 打包配置：生成 dist/MeetPointAI/MeetPointAI.exe（单目录模式）。
+"""PyInstaller 打包配置：生成 dist/MeetPoint AI/MeetPoint AI.exe（单目录模式）。
 
 用法：
     pyinstaller meetpoint.spec --noconfirm
@@ -70,7 +70,7 @@ exe = EXE(
     a.scripts,
     [],
     exclude_binaries=True,
-    name="MeetPointAI",
+    name="MeetPoint AI",
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -90,5 +90,5 @@ coll = COLLECT(
     strip=False,
     upx=False,
     upx_exclude=[],
-    name="MeetPointAI",
+    name="MeetPoint AI",
 )
