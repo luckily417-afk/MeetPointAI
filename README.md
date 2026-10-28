@@ -53,7 +53,7 @@ MeetPoint AI 用高德地图的真实 POI 与路线数据找出候选，用 Deep
 1. 双击 `MeetPoint-AI-Setup-V0.0.0.1-win-x64.exe`；
 2. 安装位置默认 `%LOCALAPPDATA%\Programs\MeetPoint AI`（**按用户安装，不需要管理员权限**）；
 3. 安装完成后从开始菜单（或桌面快捷方式，安装时勾选）启动 **MeetPoint AI**；
-4. 首次启动会提示配置 API Key，见 [第 4 节](#4-首次配置必读)。
+4. 首次启动会提示配置 API Key，见 [第 3 节](#3-首次配置必读)。
 
 ```powershell
 # 静默安装到指定目录（Inno Setup 参数）
