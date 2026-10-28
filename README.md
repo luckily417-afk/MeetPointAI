@@ -2,6 +2,8 @@
 
 **双人智能见面地点推荐 · Windows 桌面版**
 
+**This program only supports Mainland China and doesn’t support Hong Kong, Macau, Taiwan, or overseas regions.**
+
 你和对方分别在城市的不同位置，想约一个「双方都方便、又符合偏好」的见面地点？
 MeetPoint AI 用高德地图的真实 POI 与路线数据找出候选，用 DeepSeek 比较并给出推荐理由，再由程序做范围与路线硬校验——**不编造地点（POI/坐标/路线全部来自高德），也不把推荐放到你画的区域外**。
 
